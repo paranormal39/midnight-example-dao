@@ -13,8 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-export * as Counter from "./managed/counter/contract/index.js";
-export * from "./witnesses";
+import { run } from './dao-cli.js';
+import { PreprodConfig } from './config.js';
+import { createLogger } from './logger-utils.js';
 
-export * as Dao from "./managed/dao/contract/index.js";
-export * from "./dao-witnesses";
+const config = new PreprodConfig();
+const logger = await createLogger(config.logDir);
+
+await run(config, logger);

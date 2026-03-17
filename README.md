@@ -1,8 +1,31 @@
-# Counter DApp
+# Midnight Example DApps
 
 [![Generic badge](https://img.shields.io/badge/Compact%20Toolchain-0.28.0-1abc9c.svg)](https://shields.io/) [![Generic badge](https://img.shields.io/badge/TypeScript-5.8.3-blue.svg)](https://shields.io/)
 
-A Midnight smart contract example demonstrating a simple on-chain counter. The counter uses public ledger state and serves as a starting point for building Midnight DApps.
+This repository contains two Midnight smart contract examples:
+
+1. **Counter DApp** - A simple on-chain counter demonstrating basic Midnight contract development
+2. **DAO Voting DApp** - A privacy-preserving voting system using zero-knowledge proofs
+
+Both serve as starting points for building Midnight DApps.
+
+## Available DApps
+
+### Counter DApp
+A simple counter that increments an on-chain value. Great for learning the basics of Midnight contract development.
+
+### DAO Voting DApp
+A privacy-preserving DAO voting contract that enables:
+- **Private voting** - Individual votes remain hidden using zero-knowledge proofs
+- **Public tallies** - Vote totals are visible on-chain for transparency
+- **Multi-proposal support** - Create and vote on multiple proposals
+- **Three vote types** - YES, NO, and APPEAL options
+
+For detailed DAO documentation, see:
+- [DAO-CONCEPTS.md](DAO-CONCEPTS.md) - Core concepts and architecture
+- [DAO-DEPLOYMENT.md](DAO-DEPLOYMENT.md) - Deployment and API reference
+
+## Network Targets
 
 Supports three network targets:
 
@@ -16,11 +39,19 @@ Supports three network targets:
 
 ```
 example-counter/
-├── contract/                          # Smart contract (Compact language)
-│   ├── src/counter.compact            # The counter smart contract
+├── contract/                          # Smart contracts (Compact language)
+│   ├── src/counter.compact            # Counter smart contract
+│   ├── src/dao.compact                # DAO voting smart contract
+│   ├── src/witnesses.ts               # Counter witness functions
+│   ├── src/dao-witnesses.ts           # DAO witness functions
 │   └── src/test/                      # Contract unit tests
-└── counter-cli/                       # Command-line interface
-    ├── src/                           # CLI implementation
+└── counter-cli/                       # Command-line interfaces
+    ├── src/api.ts                     # Counter contract API
+    ├── src/cli.ts                     # Counter CLI interface
+    ├── src/dao-api.ts                 # DAO contract API
+    ├── src/dao-cli.ts                 # DAO CLI interface
+    ├── src/dao-types.ts               # DAO TypeScript types
+    ├── src/dao-storage.ts             # Local proposal storage
     ├── proof-server.yml               # Proof server Docker config (preprod/preview)
     ├── standalone.yml                 # Full local stack Docker config
     └── standalone.env.example         # Default env vars for standalone mode
@@ -61,25 +92,32 @@ compact compile --version
 npm install
 ```
 
-### 2. Build the smart contract
+### 2. Build the smart contracts
 
 ```bash
 cd contract
-npm run compact
+npm run compact:all    # Compiles both counter and DAO contracts
 npm run build
 npm run test
 ```
 
-Expected output from `npm run compact`:
+Expected output from `npm run compact:all`:
 
 ```
 Compiling 1 circuits:
   circuit "increment" (k=10, rows=29)
+Compiling 4 circuits:
+  circuit "create_proposal" ...
+  circuit "vote_yes" ...
+  circuit "vote_no" ...
+  circuit "vote_appeal" ...
 ```
 
 The first run may download zero-knowledge parameters (~500MB). This is a one-time download.
 
-### 3. Run the DApp
+### 3. Run a DApp
+
+#### Counter DApp
 
 Option A — **auto-start proof server** (recommended):
 
@@ -88,7 +126,18 @@ cd counter-cli
 npm run preprod-ps
 ```
 
-This pulls the proof server Docker image, starts it, and launches the CLI.
+This pulls the proof server Docker image, starts it, and launches the Counter CLI.
+
+#### DAO Voting DApp
+
+```bash
+cd counter-cli
+npm run dao-ps    # Auto-starts proof server
+# or
+npm run dao       # Manual proof server (start separately)
+```
+
+This launches the DAO CLI for creating proposals and voting.
 
 > **Mac ARM (Apple Silicon) users**: If the proof server hangs, enable Docker VMM in Docker Desktop: Settings → General → "Virtual Machine Options" → select **Docker VMM**. Restart Docker after changing.
 
@@ -227,9 +276,55 @@ This is useful for:
 | Tests fail with "Cannot find module" | Build the contract first: `cd contract && npm run compact && npm run build` |
 | Node.js warnings about experimental features | Normal — these don't affect functionality. |
 
+## Using the DAO Voting DApp
+
+The DAO CLI provides a privacy-preserving voting interface:
+
+### DAO Menu Options
+
+After wallet setup, the DAO menu appears:
+
+```
+──────────────────────────────────────────────────────────────
+  DAO Actions                           DUST: 405,083,000,000,000
+──────────────────────────────────────────────────────────────
+  [1] Deploy a new DAO contract
+  [2] Join an existing DAO contract
+  [3] Monitor DUST balance
+  [4] Exit
+```
+
+### Creating Proposals
+
+After deploying or joining a DAO contract:
+
+1. Choose **Create Proposal**
+2. Enter proposal details (type, title, description)
+3. The proposal is created on-chain with a SHA-256 hash of the metadata
+
+### Voting on Proposals
+
+1. Choose **Vote on Proposal**
+2. Select a proposal from the list
+3. Choose your vote: **YES**, **NO**, or **APPEAL**
+4. Your vote is cast privately using a zero-knowledge proof
+
+### Privacy Model
+
+| Data | Visibility |
+|------|------------|
+| Proposal metadata hash | **Public** (on-chain) |
+| Vote totals (YES/NO/APPEAL) | **Public** (on-chain) |
+| Individual votes | **Private** (ZK proof) |
+| Voter identity | **Private** (not linked) |
+
+For more details, see [DAO-CONCEPTS.md](DAO-CONCEPTS.md).
+
 ## Useful Links
 
 - [Preprod Faucet](https://faucet.preprod.midnight.network) — Get preprod tNight tokens
 - [Midnight Documentation](https://docs.midnight.network/) — Developer guide
 - [Compact Language Guide](https://docs.midnight.network/compact) — Smart contract language reference
 - [Migration Guide](MIGRATION_GUIDE.md) — Detailed guide for migrating to Preprod with midnight-js 3.0.0 and wallet-sdk-facade 1.0.0
+- [DAO Concepts](DAO-CONCEPTS.md) — Deep dive into DAO architecture and zero-knowledge voting
+- [DAO Deployment](DAO-DEPLOYMENT.md) — DAO contract API reference and deployment guide

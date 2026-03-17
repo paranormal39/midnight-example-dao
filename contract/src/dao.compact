@@ -1,0 +1,48 @@
+pragma language_version >= 0.20;
+
+import CompactStandardLibrary;
+
+// Proposal counter
+export ledger proposalCount: Counter;
+
+// Proposal metadata - Map from proposalId to metaHash
+export ledger proposalMeta: Map<Field, Bytes<32>>;
+
+// Vote tallies per proposal - Map from proposalId to vote count (as Field)
+export ledger votesYes: Map<Field, Field>;
+export ledger votesNo: Map<Field, Field>;
+export ledger votesAppeal: Map<Field, Field>;
+
+// Create a new proposal
+// proposalId should match current proposalCount (read off-chain)
+export circuit create_proposal(proposalId: Field, metaHash: Bytes<32>): [] {
+  const pid = disclose(proposalId);
+  const hash = disclose(metaHash);
+  proposalCount.increment(1);
+  proposalMeta.insert(pid, hash);
+  votesYes.insert(pid, 0 as Field);
+  votesNo.insert(pid, 0 as Field);
+  votesAppeal.insert(pid, 0 as Field);
+}
+
+// Vote YES on a proposal
+// currentVotes should be read from ledger state off-chain
+export circuit vote_yes(proposalId: Field, currentVotes: Field): [] {
+  const pid = disclose(proposalId);
+  const curr = disclose(currentVotes);
+  votesYes.insert(pid, curr + 1);
+}
+
+// Vote NO on a proposal
+export circuit vote_no(proposalId: Field, currentVotes: Field): [] {
+  const pid = disclose(proposalId);
+  const curr = disclose(currentVotes);
+  votesNo.insert(pid, curr + 1);
+}
+
+// Vote APPEAL on a proposal
+export circuit vote_appeal(proposalId: Field, currentVotes: Field): [] {
+  const pid = disclose(proposalId);
+  const curr = disclose(currentVotes);
+  votesAppeal.insert(pid, curr + 1);
+}

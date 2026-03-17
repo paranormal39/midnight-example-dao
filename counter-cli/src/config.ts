@@ -22,6 +22,11 @@ export const contractConfig = {
   zkConfigPath: path.resolve(currentDir, '..', '..', 'contract', 'src', 'managed', 'counter'),
 };
 
+export const daoContractConfig = {
+  privateStateStoreName: 'dao-private-state',
+  zkConfigPath: path.resolve(currentDir, '..', '..', 'contract', 'src', 'managed', 'dao'),
+};
+
 export interface Config {
   readonly logDir: string;
   readonly indexer: string;

@@ -17,9 +17,11 @@
   },
   "scripts": {
     "compact": "compact compile src/counter.compact src/managed/counter",
+    "compact:dao": "compact compile src/dao.compact src/managed/dao",
+    "compact:all": "npm run compact && npm run compact:dao",
     "test": "vitest run",
     "test:compile": "npm run compact && vitest run",
-    "build": "rm -rf dist && tsc --project tsconfig.build.json && cp -Rf ./src/managed ./dist/managed && cp ./src/counter.compact ./dist",
+    "build": "rm -rf dist && tsc --project tsconfig.build.json && cp -Rf ./src/managed ./dist/managed && cp ./src/counter.compact ./dist && cp ./src/dao.compact ./dist",
     "lint": "eslint src",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
