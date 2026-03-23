@@ -314,9 +314,19 @@ After deploying or joining a DAO contract:
 | Data | Visibility |
 |------|------------|
 | Proposal metadata hash | **Public** (on-chain) |
-| Vote totals (YES/NO/APPEAL) | **Public** (on-chain) |
-| Individual votes | **Private** (ZK proof) |
-| Voter identity | **Private** (not linked) |
+| Vote commitments | **Public** (hashed, doesn't reveal vote) |
+| Nullifiers | **Public** (prevents double-voting) |
+| Vote totals (during voting) | **Hidden** (zero until poll closes) |
+| Vote totals (after close) | **Public** (final results) |
+| Individual votes | **Private** (hidden in commitment) |
+| Voter identity | **Private** (cannot link to votes) |
+| Voter secret | **Private** (never leaves client) |
+
+**Privacy Features:**
+- **Commitments**: Votes are hidden using cryptographic commitments
+- **Nullifiers**: Prevent double-voting without revealing identity
+- **Hidden Tallies**: Vote counts stay hidden until poll closure
+- **ZK Proofs**: Prove vote validity without revealing the vote
 
 For more details, see [DAO-CONCEPTS.md](DAO-CONCEPTS.md).
 

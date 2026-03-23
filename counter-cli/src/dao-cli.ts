@@ -13,19 +13,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { type WalletContext } from './api';
+import { type WalletContext } from './api.js';
 import { stdin as input, stdout as output } from 'node:process';
 import { createInterface, type Interface } from 'node:readline/promises';
 import { type Logger } from 'pino';
 import { type StartedDockerComposeEnvironment, type DockerComposeEnvironment } from 'testcontainers';
-import { type DaoProviders, type DeployedDaoContract, type ProposalMetadata } from './dao-types';
-import { createHash } from 'crypto';
-import { type Config, StandaloneConfig } from './config';
-import * as api from './api';
-import * as daoApi from './dao-api';
-import * as storage from './dao-storage';
+import { type DaoProviders, type DeployedDaoContract, type ProposalMetadata } from './dao-types.js';
+import { createHash, randomBytes } from 'crypto';
+import { type Config, StandaloneConfig } from './config.js';
+import * as api from './api.js';
+import * as daoApi from './dao-api.js';
+import * as storage from './dao-storage.js';
 
 let logger: Logger;
+
+// Voter secret for this session - used for nullifier generation
+let voterSecret: Uint8Array = randomBytes(32);
 
 const GENESIS_MINT_WALLET_SEED = '0000000000000000000000000000000000000000000000000000000000000001';
 
@@ -187,7 +190,7 @@ const selectProposal = async (
   
   try {
     const contract = await api.withStatus(`Connecting to proposal`, () =>
-      daoApi.joinDaoContract(providers, metadata.contractAddress),
+      daoApi.joinDaoContract(providers, metadata.contractAddress, voterSecret),
     );
     console.log(`  ✓ Connected! You can now vote on this proposal.\n`);
     return { contract, metadata };
@@ -212,7 +215,7 @@ const deployOrJoin = async (
         try {
           // First deploy the contract
           const contract = await api.withStatus('Deploying DAO contract', () =>
-            daoApi.deployDaoContract(providers),
+            daoApi.deployDaoContract(providers, voterSecret),
           );
           const contractAddress = contract.deployTxData.public.contractAddress;
           console.log(`  Contract deployed at: ${contractAddress}\n`);
@@ -263,7 +266,7 @@ const deployOrJoin = async (
           const policyType = await rli.question('Enter the policy type: ');
           const policyTitle = await rli.question('Enter the policy title: ');
           const policyDescription = await rli.question('Enter the description: ');
-          const contract = await daoApi.joinDaoContract(providers, contractAddress.trim());
+          const contract = await daoApi.joinDaoContract(providers, contractAddress.trim(), voterSecret);
           const metadata: ProposalMetadata = {
             policyType: policyType.trim(),
             policyTitle: policyTitle.trim(),
@@ -336,8 +339,7 @@ const votingLoop = async (
     switch (choice.trim()) {
       case '1':
         try {
-          const currentVotes = await getCurrentVotes('yes');
-          await api.withStatus('Voting YES', () => daoApi.voteYes(contract, proposalId, currentVotes));
+          await api.withStatus('Voting YES', () => daoApi.voteYes(contract, providers, proposalId, voterSecret));
           console.log('  ✓ Vote submitted successfully!\n');
           return true;
         } catch (e) {
@@ -347,8 +349,7 @@ const votingLoop = async (
         break;
       case '2':
         try {
-          const currentVotes = await getCurrentVotes('no');
-          await api.withStatus('Voting NO', () => daoApi.voteNo(contract, proposalId, currentVotes));
+          await api.withStatus('Voting NO', () => daoApi.voteNo(contract, providers, proposalId, voterSecret));
           console.log('  ✓ Vote submitted successfully!\n');
           return true;
         } catch (e) {
@@ -358,8 +359,7 @@ const votingLoop = async (
         break;
       case '3':
         try {
-          const currentVotes = await getCurrentVotes('appeal');
-          await api.withStatus('Voting APPEAL', () => daoApi.voteAppeal(contract, proposalId, currentVotes));
+          await api.withStatus('Voting APPEAL', () => daoApi.voteAppeal(contract, providers, proposalId, voterSecret));
           console.log('  ✓ Vote submitted successfully!\n');
           return true;
         } catch (e) {

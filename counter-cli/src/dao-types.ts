@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { Dao, type DaoPrivateState } from '@midnight-ntwrk/counter-contract';
+import { Dao, type DaoPrivateState, VoteChoice } from '@midnight-ntwrk/counter-contract';
 import type { MidnightProviders } from '@midnight-ntwrk/midnight-js-types';
 import type { DeployedContract, FoundContract } from '@midnight-ntwrk/midnight-js-contracts';
 import type { ImpureCircuitId } from '@midnight-ntwrk/compact-js';
@@ -34,4 +34,33 @@ export interface ProposalMetadata {
   policyDescription: string;
   contractAddress: string;
   proposalId?: bigint;
+}
+
+// Re-export VoteChoice for convenience
+export { VoteChoice };
+
+// Proposal status enum
+export enum ProposalStatus {
+  ACTIVE = 0,
+  CLOSED = 1,
+}
+
+// Vote commitment data - used for private voting
+export interface VoteCommitmentData {
+  commitment: Uint8Array;    // hash(voteChoice || voterSecret)
+  nullifier: Uint8Array;     // hash(voterSecret || proposalId)
+  encryptedVote: Uint8Array; // Encrypted vote for later tallying
+}
+
+// Extended ledger state with privacy features
+export interface DaoLedgerStateExtended {
+  proposalCount: bigint;
+  proposalMeta: Map<bigint, Uint8Array>;
+  proposalStatus: Map<bigint, ProposalStatus>;
+  voteCommitments: Map<bigint, Set<Uint8Array>>;
+  voteNullifiers: Map<bigint, Set<Uint8Array>>;
+  votesYes: Map<bigint, bigint>;
+  votesNo: Map<bigint, bigint>;
+  votesAppeal: Map<bigint, bigint>;
+  encryptedVotes: Map<bigint, Set<Uint8Array>>;
 }

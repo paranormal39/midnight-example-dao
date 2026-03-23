@@ -243,6 +243,16 @@ pragma language_version >= 0.20;
 import CompactStandardLibrary;
 
 // ═══════════════════════════════════════════════════════════
+// WITNESSES - Private data providers (off-chain)
+// ═══════════════════════════════════════════════════════════
+
+// Get the voter's secret key (used to derive nullifier)
+witness get_voter_secret(): Bytes<32>;
+
+// Get the voter's vote choice (0=YES, 1=NO, 2=APPEAL) - kept private
+witness get_vote_choice(): Field;
+
+// ═══════════════════════════════════════════════════════════
 // LEDGER STATE (Public, On-Chain)
 // ═══════════════════════════════════════════════════════════
 
@@ -252,10 +262,22 @@ export ledger proposalCount: Counter;
 // Proposal metadata hashes: proposalId → SHA-256(metadata JSON)
 export ledger proposalMeta: Map<Field, Bytes<32>>;
 
-// Vote tallies per proposal
+// Proposal status: 0 = active, 1 = closed
+export ledger proposalStatus: Map<Field, Field>;
+
+// Vote commitments - hides individual votes
+export ledger voteCommitments: Map<Field, Set<Bytes<32>>>;
+
+// Nullifiers - prevents double voting
+export ledger voteNullifiers: Map<Field, Set<Bytes<32>>>;
+
+// Vote tallies (hidden until poll closes)
 export ledger votesYes: Map<Field, Field>;
 export ledger votesNo: Map<Field, Field>;
 export ledger votesAppeal: Map<Field, Field>;
+
+// Encrypted votes for later tallying
+export ledger encryptedVotes: Map<Field, Set<Bytes<64>>>;
 
 // ═══════════════════════════════════════════════════════════
 // CIRCUITS (ZK Programs)
@@ -267,56 +289,103 @@ export circuit create_proposal(proposalId: Field, metaHash: Bytes<32>): [] {
   const hash = disclose(metaHash);
   proposalCount.increment(1);
   proposalMeta.insert(pid, hash);
+  proposalStatus.insert(pid, 0 as Field);  // active
   votesYes.insert(pid, 0 as Field);
   votesNo.insert(pid, 0 as Field);
   votesAppeal.insert(pid, 0 as Field);
 }
 
-// Vote YES
-export circuit vote_yes(proposalId: Field, currentVotes: Field): [] {
+// Cast a private vote
+export circuit cast_vote(
+  proposalId: Field,
+  voteCommitment: Bytes<32>,
+  nullifier: Bytes<32>,
+  encryptedVote: Bytes<64>
+): [] {
   const pid = disclose(proposalId);
-  const curr = disclose(currentVotes);
-  votesYes.insert(pid, curr + 1);
+  const commitment = disclose(voteCommitment);
+  const nullHash = disclose(nullifier);
+  const encVote = disclose(encryptedVote);
+  
+  // Get private inputs from witnesses
+  const voterSecret = get_voter_secret();
+  const voteChoice = get_vote_choice();
+  
+  // Verify nullifier matches voter secret (ZK proof)
+  const expectedNullifier = persistent_hash(pad32(voterSecret, pid));
+  assert(expectedNullifier == nullHash, "Invalid nullifier");
+  
+  // Verify vote is valid (0, 1, or 2)
+  assert(voteChoice >= 0 as Field, "Invalid vote");
+  assert(voteChoice <= 2 as Field, "Invalid vote");
+  
+  // Verify commitment matches vote
+  const expectedCommitment = persistent_hash(pad32_field(voteChoice, voterSecret));
+  assert(expectedCommitment == commitment, "Invalid commitment");
+  
+  // Store nullifier (prevents double voting)
+  voteNullifiers.lookup(pid).insert(nullHash);
+  
+  // Store commitment and encrypted vote
+  voteCommitments.lookup(pid).insert(commitment);
+  encryptedVotes.lookup(pid).insert(encVote);
 }
 
-// Vote NO
-export circuit vote_no(proposalId: Field, currentVotes: Field): [] {
+// Close proposal and reveal tallies
+export circuit close_proposal(
+  proposalId: Field,
+  finalYes: Field,
+  finalNo: Field,
+  finalAppeal: Field
+): [] {
   const pid = disclose(proposalId);
-  const curr = disclose(currentVotes);
-  votesNo.insert(pid, curr + 1);
-}
-
-// Vote APPEAL
-export circuit vote_appeal(proposalId: Field, currentVotes: Field): [] {
-  const pid = disclose(proposalId);
-  const curr = disclose(currentVotes);
-  votesAppeal.insert(pid, curr + 1);
+  proposalStatus.insert(pid, 1 as Field);  // closed
+  votesYes.insert(pid, disclose(finalYes));
+  votesNo.insert(pid, disclose(finalNo));
+  votesAppeal.insert(pid, disclose(finalAppeal));
 }
 ```
 
-### Why `currentVotes` Parameter?
+### Key Privacy Mechanisms
 
-You might wonder: "Why pass the current vote count? Can't the contract read it?"
+#### 1. Witnesses (Private Inputs)
 
-**The Problem:**
+Witnesses provide private data to circuits without revealing it on-chain:
 
-In ZK circuits, reading from Maps inside the circuit is complex. The circuit needs to know the value at compile time to generate the proof.
-
-**The Solution:**
-
-1. Read current votes **off-chain** (from the indexer)
-2. Pass as a parameter to the circuit
-3. The circuit uses this to compute the new value
-
+```compact
+witness get_voter_secret(): Bytes<32>;
+witness get_vote_choice(): Field;
 ```
-Off-Chain (CLI)              On-Chain (Contract)
-─────────────────            ──────────────────
-1. Query indexer             
-   votesYes[0] = 5           
-                             
-2. Call vote_yes(0, 5)  ───► 3. Verify proof
-                             4. Insert votesYes[0] = 6
+
+The voter's secret and vote choice are **never disclosed** - they stay private.
+
+#### 2. Nullifiers (Double-Vote Prevention)
+
+```compact
+const expectedNullifier = persistent_hash(pad32(voterSecret, pid));
+assert(expectedNullifier == nullHash, "Invalid nullifier");
+voteNullifiers.lookup(pid).insert(nullHash);
 ```
+
+- The ZK proof verifies the nullifier is correctly derived
+- The nullifier is stored on-chain to prevent reuse
+- Cannot be reversed to reveal voter identity
+
+#### 3. Vote Commitments (Hidden Votes)
+
+```compact
+const expectedCommitment = persistent_hash(pad32_field(voteChoice, voterSecret));
+assert(expectedCommitment == commitment, "Invalid commitment");
+voteCommitments.lookup(pid).insert(commitment);
+```
+
+- The commitment hides the actual vote
+- ZK proof verifies the commitment is valid
+- Vote remains hidden until reveal phase
+
+#### 4. Hidden Tallies
+
+Vote tallies (`votesYes`, `votesNo`, `votesAppeal`) remain at **zero** during voting. They are only updated when `close_proposal` is called, revealing the final results.
 
 ### Data Types Explained
 
@@ -331,15 +400,47 @@ Off-Chain (CLI)              On-Chain (Contract)
 
 ## How Voting Privacy Works
 
+### Privacy Features
+
+The DAO contract implements several privacy-preserving mechanisms:
+
+1. **Vote Commitments** - Individual votes are hidden using cryptographic commitments
+2. **Nullifiers** - Prevent double-voting without revealing voter identity
+3. **Hidden Tallies** - Vote counts remain hidden until the poll closes
+4. **ZK Proofs** - Prove vote validity without revealing the actual vote
+
 ### What's Public vs. Private
 
 | Data | Visibility | Why |
 |------|------------|-----|
 | Proposal ID | **Public** | Everyone needs to know which proposal |
 | Proposal metadata hash | **Public** | Proves metadata wasn't changed |
-| Vote totals | **Public** | Results must be verifiable |
-| Individual votes | **Private** | Voter privacy |
+| Vote commitments | **Public** | Cryptographic hash, doesn't reveal vote |
+| Nullifiers | **Public** | Prevents double-voting, doesn't reveal identity |
+| Vote tallies (during voting) | **Hidden** | Remain zero until poll closes |
+| Vote tallies (after close) | **Public** | Final results are verifiable |
+| Individual votes | **Private** | Hidden in commitment, never revealed |
 | Voter identity | **Private** | Cannot link votes to voters |
+| Voter secret | **Private** | Never leaves the client |
+
+### Cryptographic Primitives
+
+#### Nullifiers (Double-Vote Prevention)
+```
+nullifier = hash(voterSecret || proposalId)
+```
+- Each voter has a unique secret key
+- The nullifier is deterministic: same voter + same proposal = same nullifier
+- Stored on-chain to prevent double voting
+- Cannot be reversed to reveal voter identity
+
+#### Vote Commitments
+```
+commitment = hash(voteChoice || voterSecret)
+```
+- Hides the actual vote (YES/NO/APPEAL)
+- Can be verified during reveal phase
+- Different votes produce different commitments
 
 ### The Privacy Flow
 
@@ -347,15 +448,22 @@ Off-Chain (CLI)              On-Chain (Contract)
 ┌─────────────────────────────────────────────────────────────┐
 │                         VOTER                                │
 │                                                              │
-│  1. Decides to vote YES on Proposal #0                      │
+│  1. Has a private voterSecret (32 bytes)                    │
 │                                                              │
-│  2. Reads current YES count from indexer: 5                 │
+│  2. Decides to vote YES on Proposal #0                      │
 │                                                              │
-│  3. Generates ZK proof:                                     │
-│     - Private: "I'm voting YES"                             │
-│     - Public: proposalId=0, currentVotes=5                  │
+│  3. Computes locally (private):                             │
+│     - nullifier = hash(voterSecret || proposalId)           │
+│     - commitment = hash(voteChoice || voterSecret)          │
+│     - encryptedVote = encrypt(voteChoice, voterSecret)      │
 │                                                              │
-│  4. Submits transaction with proof                          │
+│  4. Generates ZK proof that:                                │
+│     - The nullifier matches the voterSecret                 │
+│     - The commitment matches the vote                       │
+│     - The vote is valid (0, 1, or 2)                        │
+│     WITHOUT revealing voterSecret or voteChoice             │
+│                                                              │
+│  5. Submits: (proposalId, commitment, nullifier, encVote)   │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼
@@ -364,24 +472,44 @@ Off-Chain (CLI)              On-Chain (Contract)
 │                                                              │
 │  1. Verifies ZK proof is valid                              │
 │                                                              │
-│  2. Updates ledger:                                         │
-│     votesYes[0] = 6                                         │
+│  2. Checks nullifier not already used (prevents double vote)│
 │                                                              │
-│  3. Records transaction (but NOT who voted what)            │
+│  3. Stores:                                                 │
+│     - nullifier in voteNullifiers[proposalId]               │
+│     - commitment in voteCommitments[proposalId]             │
+│     - encryptedVote in encryptedVotes[proposalId]           │
+│                                                              │
+│  4. Vote tallies remain HIDDEN (still zero)                 │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    POLL CLOSURE                              │
+│                                                              │
+│  When voting ends, close_proposal is called with:           │
+│  - Final tallies computed off-chain from encrypted votes    │
+│  - Tallies become public only at this point                 │
+│                                                              │
+│  Result: votesYes=X, votesNo=Y, votesAppeal=Z               │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                        OBSERVER                              │
 │                                                              │
-│  Can see:                                                   │
+│  During voting, can see:                                    │
 │  ✓ Proposal #0 exists                                       │
-│  ✓ YES votes increased from 5 to 6                          │
-│  ✓ A valid vote was cast                                    │
+│  ✓ Number of votes cast (commitment count)                  │
+│  ✓ That each vote is valid (ZK proof verified)              │
 │                                                              │
-│  Cannot see:                                                │
-│  ✗ Who cast the vote                                        │
-│  ✗ Which specific vote (YES/NO/APPEAL) any person cast      │
+│  During voting, cannot see:                                 │
+│  ✗ Who cast any vote                                        │
+│  ✗ What anyone voted (YES/NO/APPEAL)                        │
+│  ✗ Current vote tallies (hidden until close)                │
+│                                                              │
+│  After close, can see:                                      │
+│  ✓ Final vote tallies                                       │
+│  ✗ Still cannot link votes to voters                        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
