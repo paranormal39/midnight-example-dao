@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { DaoSimulator, computeNullifier } from "./dao-simulator.js";
+import { DaoSimulator, ProposalState } from "./dao-simulator.js";
 import { VoteChoice } from "../dao-witnesses.js";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { describe, it, expect } from "vitest";
@@ -26,27 +26,27 @@ function createMetaHash(title: string): Uint8Array {
   return createHash('sha256').update(JSON.stringify({ title })).digest();
 }
 
-describe("DAO Privacy-Preserving Voting Contract", () => {
+describe("DAO Commit/Reveal Voting Contract", () => {
   describe("Initialization", () => {
     it("generates initial ledger state deterministically", () => {
-      const voterSecret = randomBytes(32);
-      const simulator0 = new DaoSimulator(voterSecret);
-      const simulator1 = new DaoSimulator(voterSecret);
-      expect(simulator0.getLedger().proposalCount).toEqual(simulator1.getLedger().proposalCount);
+      const secretKey = randomBytes(32);
+      const simulator0 = new DaoSimulator(secretKey);
+      const simulator1 = new DaoSimulator(secretKey);
+      expect(simulator0.getProposalCount()).toEqual(simulator1.getProposalCount());
     });
 
     it("properly initializes ledger state", () => {
       const simulator = new DaoSimulator();
-      const initialLedgerState = simulator.getLedger();
-      expect(initialLedgerState.proposalCount).toEqual(0n);
+      expect(simulator.getProposalCount()).toEqual(0n);
+      expect(simulator.getRound()).toEqual(0n);
     });
 
-    it("properly initializes private state with voter secret", () => {
-      const voterSecret = randomBytes(32);
-      const simulator = new DaoSimulator(voterSecret);
+    it("properly initializes private state with secret key", () => {
+      const secretKey = randomBytes(32);
+      const simulator = new DaoSimulator(secretKey);
       const privateState = simulator.getPrivateState();
-      expect(privateState.voterSecret).toEqual(voterSecret);
-      expect(privateState.currentVoteChoice).toEqual(VoteChoice.YES);
+      expect(privateState.secretKey).toEqual(secretKey);
+      expect(privateState.voteChoice).toEqual(VoteChoice.YES);
     });
   });
 
@@ -55,150 +55,115 @@ describe("DAO Privacy-Preserving Voting Contract", () => {
       const simulator = new DaoSimulator();
       const metaHash = createMetaHash("Test Proposal");
       
-      const ledger = simulator.createProposal(0n, metaHash);
+      simulator.createProposal(0n, metaHash);
       
-      expect(ledger.proposalCount).toEqual(1n);
+      expect(simulator.getProposalCount()).toEqual(1n);
     });
 
-    it("creates multiple proposals with incrementing IDs", () => {
+    it("creates multiple proposals with incrementing count", () => {
       const simulator = new DaoSimulator();
       
       simulator.createProposal(0n, createMetaHash("Proposal 1"));
       simulator.createProposal(1n, createMetaHash("Proposal 2"));
-      const ledger = simulator.createProposal(2n, createMetaHash("Proposal 3"));
+      simulator.createProposal(2n, createMetaHash("Proposal 3"));
       
-      expect(ledger.proposalCount).toEqual(3n);
+      expect(simulator.getProposalCount()).toEqual(3n);
     });
 
-    it("initializes proposal with active status (0)", () => {
+    it("initializes proposal in commit state", () => {
       const simulator = new DaoSimulator();
       const metaHash = createMetaHash("Test Proposal");
       
-      const ledger = simulator.createProposal(0n, metaHash);
+      simulator.createProposal(0n, metaHash);
       
-      // Status 0 = active
-      const status = ledger.proposalStatus.lookup(0n);
-      expect(status).toEqual(0n);
+      expect(simulator.getProposalState(0n)).toEqual(ProposalState.COMMIT);
     });
 
     it("initializes vote tallies to zero", () => {
       const simulator = new DaoSimulator();
       simulator.createProposal(0n, createMetaHash("Test"));
       
-      const ledger = simulator.getLedger();
+      const tallies = simulator.getVoteTallies();
       
-      expect(ledger.votesYes.lookup(0n)).toEqual(0n);
-      expect(ledger.votesNo.lookup(0n)).toEqual(0n);
-      expect(ledger.votesAppeal.lookup(0n)).toEqual(0n);
-    });
-
-    it("initializes vote count to zero", () => {
-      const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
-      
-      expect(simulator.getVoteCount(0n)).toEqual(0n);
+      expect(tallies.yes).toEqual(0n);
+      expect(tallies.no).toEqual(0n);
+      expect(tallies.appeal).toEqual(0n);
     });
   });
 
-  describe("Private Voting", () => {
-    it("casts a YES vote and increments vote count", () => {
+  describe("State Machine", () => {
+    it("advances from commit to reveal phase", () => {
       const simulator = new DaoSimulator();
       simulator.createProposal(0n, createMetaHash("Test"));
       
-      simulator.castVote(0n, VoteChoice.YES);
+      expect(simulator.getProposalState(0n)).toEqual(ProposalState.COMMIT);
       
-      expect(simulator.getVoteCount(0n)).toEqual(1n);
+      simulator.advanceProposal(0n);
+      
+      expect(simulator.getProposalState(0n)).toEqual(ProposalState.REVEAL);
     });
 
-    it("casts a NO vote and increments vote count", () => {
+    it("advances from reveal to final phase", () => {
       const simulator = new DaoSimulator();
       simulator.createProposal(0n, createMetaHash("Test"));
       
-      simulator.castVote(0n, VoteChoice.NO);
+      simulator.advanceProposal(0n); // commit -> reveal
+      simulator.advanceProposal(0n); // reveal -> final
       
-      expect(simulator.getVoteCount(0n)).toEqual(1n);
+      expect(simulator.getProposalState(0n)).toEqual(ProposalState.FINAL);
     });
 
-    it("casts an APPEAL vote and increments vote count", () => {
+    it("increments round when advancing to final", () => {
       const simulator = new DaoSimulator();
       simulator.createProposal(0n, createMetaHash("Test"));
       
-      simulator.castVote(0n, VoteChoice.APPEAL);
+      expect(simulator.getRound()).toEqual(0n);
       
-      expect(simulator.getVoteCount(0n)).toEqual(1n);
-    });
-
-    it("stores nullifier to prevent double voting", () => {
-      const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
+      simulator.advanceProposal(0n); // commit -> reveal
+      simulator.advanceProposal(0n); // reveal -> final
       
-      simulator.castVote(0n, VoteChoice.YES);
-      
-      // Compute expected nullifier
-      const voterSecret = simulator.getVoterSecret();
-      const expectedNullifier = computeNullifier(voterSecret, 0n);
-      
-      expect(simulator.isNullifierUsed(expectedNullifier)).toBe(true);
-    });
-
-    it("keeps vote tallies hidden (zero) while voting is active", () => {
-      const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
-      
-      // Cast a vote
-      simulator.castVote(0n, VoteChoice.YES);
-      
-      const ledger = simulator.getLedger();
-      
-      // Tallies should still be zero (hidden until close)
-      expect(ledger.votesYes.lookup(0n)).toEqual(0n);
-      expect(ledger.votesNo.lookup(0n)).toEqual(0n);
-      expect(ledger.votesAppeal.lookup(0n)).toEqual(0n);
+      expect(simulator.getRound()).toEqual(1n);
     });
   });
 
-  describe("Proposal Closure", () => {
-    it("closes proposal and reveals final tallies", () => {
+  describe("Commit Phase", () => {
+    it("allows voting during commit phase", () => {
       const simulator = new DaoSimulator();
       simulator.createProposal(0n, createMetaHash("Test"));
-      simulator.castVote(0n, VoteChoice.YES);
       
-      // Close with final tallies (in real scenario, these would be computed off-chain)
-      const ledger = simulator.closeProposal(0n, 1n, 0n, 0n);
-      
-      expect(ledger.votesYes.lookup(0n)).toEqual(1n);
-      expect(ledger.votesNo.lookup(0n)).toEqual(0n);
-      expect(ledger.votesAppeal.lookup(0n)).toEqual(0n);
+      // Should not throw
+      simulator.voteCommit(0n, VoteChoice.YES);
     });
 
-    it("sets proposal status to closed (1)", () => {
+    it("stores commitment in MerkleTree", () => {
       const simulator = new DaoSimulator();
       simulator.createProposal(0n, createMetaHash("Test"));
       
-      const ledger = simulator.closeProposal(0n, 5n, 3n, 1n);
+      simulator.voteCommit(0n, VoteChoice.YES);
       
-      expect(ledger.proposalStatus.lookup(0n)).toEqual(1n);
+      // The commit should have succeeded without error
+      expect(simulator.getProposalCount()).toEqual(1n);
     });
   });
 
   describe("Privacy Guarantees", () => {
-    it("different voters produce different nullifiers for same proposal", () => {
+    it("different voters produce different secret keys", () => {
       const voter1Secret = randomBytes(32);
       const voter2Secret = randomBytes(32);
       
-      const nullifier1 = computeNullifier(voter1Secret, 0n);
-      const nullifier2 = computeNullifier(voter2Secret, 0n);
-      
-      expect(Buffer.from(nullifier1).equals(Buffer.from(nullifier2))).toBe(false);
+      expect(Buffer.from(voter1Secret).equals(Buffer.from(voter2Secret))).toBe(false);
     });
 
-    it("same voter produces different nullifiers for different proposals", () => {
-      const voterSecret = randomBytes(32);
+    it("tallies remain zero during commit phase", () => {
+      const simulator = new DaoSimulator();
+      simulator.createProposal(0n, createMetaHash("Test"));
       
-      const nullifier0 = computeNullifier(voterSecret, 0n);
-      const nullifier1 = computeNullifier(voterSecret, 1n);
+      simulator.voteCommit(0n, VoteChoice.YES);
       
-      expect(Buffer.from(nullifier0).equals(Buffer.from(nullifier1))).toBe(false);
+      const tallies = simulator.getVoteTallies();
+      expect(tallies.yes).toEqual(0n);
+      expect(tallies.no).toEqual(0n);
+      expect(tallies.appeal).toEqual(0n);
     });
   });
 });

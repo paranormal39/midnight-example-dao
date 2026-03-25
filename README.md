@@ -15,11 +15,14 @@ Both serve as starting points for building Midnight DApps.
 A simple counter that increments an on-chain value. Great for learning the basics of Midnight contract development.
 
 ### DAO Voting DApp
-A privacy-preserving DAO voting contract that enables:
-- **Private voting** - Individual votes remain hidden using zero-knowledge proofs
-- **Public tallies** - Vote totals are visible on-chain for transparency
-- **Multi-proposal support** - Create and vote on multiple proposals
+A privacy-preserving DAO voting contract using a **commit/reveal** scheme with cryptographically enforced privacy:
+
+- **Commit/Reveal Voting** - Two-phase voting where votes are hidden during commit phase and revealed later
+- **Circuit-Derived Nullifiers** - Nullifiers computed inside ZK circuits using `persistentCommit` to prevent double voting
+- **MerkleTree Commitments** - Vote commitments stored in a MerkleTree for privacy
+- **Tally Enforcement** - Vote tallies incremented inside the reveal circuit (cryptographically enforced)
 - **Three vote types** - YES, NO, and APPEAL options
+- **Proposal State Machine** - Proposals progress through COMMIT → REVEAL → FINAL phases
 
 For detailed DAO documentation, see:
 - [DAO-CONCEPTS.md](DAO-CONCEPTS.md) - Core concepts and architecture
@@ -300,33 +303,46 @@ After deploying or joining a DAO contract:
 
 1. Choose **Create Proposal**
 2. Enter proposal details (type, title, description)
-3. The proposal is created on-chain with a SHA-256 hash of the metadata
+3. The proposal is created on-chain (starts in **COMMIT** phase)
 
-### Voting on Proposals
+### Commit/Reveal Voting Flow
 
-1. Choose **Vote on Proposal**
-2. Select a proposal from the list
-3. Choose your vote: **YES**, **NO**, or **APPEAL**
-4. Your vote is cast privately using a zero-knowledge proof
+The DAO uses a **two-phase voting scheme** for cryptographic privacy:
+
+**COMMIT Phase:**
+1. Select a proposal in COMMIT phase
+2. Choose your vote: **YES**, **NO**, or **APPEAL**
+3. Your vote commitment is submitted (vote stays hidden)
+4. Nullifier prevents double-commit
+
+**REVEAL Phase:**
+1. Admin advances proposal to REVEAL phase
+2. Reveal your vote to increment the tally
+3. Tally is incremented **inside the ZK circuit** (cryptographically enforced)
+
+**FINAL Phase:**
+1. Admin advances proposal to FINAL phase
+2. Results are finalized and visible
 
 ### Privacy Model
 
 | Data | Visibility |
 |------|------------|
 | Proposal metadata hash | **Public** (on-chain) |
-| Vote commitments | **Public** (hashed, doesn't reveal vote) |
-| Nullifiers | **Public** (prevents double-voting) |
-| Vote totals (during voting) | **Hidden** (zero until poll closes) |
-| Vote totals (after close) | **Public** (final results) |
+| Vote commitments | **Public** (in MerkleTree, doesn't reveal vote) |
+| Commit nullifiers | **Public** (prevents double-commit) |
+| Reveal nullifiers | **Public** (prevents double-reveal) |
+| Vote tallies (COMMIT phase) | **Hidden** (zero until reveals) |
+| Vote tallies (REVEAL/FINAL) | **Public** (incremented in circuit) |
 | Individual votes | **Private** (hidden in commitment) |
 | Voter identity | **Private** (cannot link to votes) |
-| Voter secret | **Private** (never leaves client) |
+| Voter secret key | **Private** (never leaves client) |
 
-**Privacy Features:**
-- **Commitments**: Votes are hidden using cryptographic commitments
-- **Nullifiers**: Prevent double-voting without revealing identity
-- **Hidden Tallies**: Vote counts stay hidden until poll closure
-- **ZK Proofs**: Prove vote validity without revealing the vote
+**Cryptographic Enforcement:**
+- **Circuit-derived nullifiers**: Using `persistentCommit`, nullifiers cannot be forged
+- **MerkleTree commitments**: Vote choices hidden until reveal phase
+- **Tally enforcement**: Incremented inside ZK circuit, cannot be manipulated
+- **Round counter**: Prevents replay attacks across voting rounds
 
 For more details, see [DAO-CONCEPTS.md](DAO-CONCEPTS.md).
 

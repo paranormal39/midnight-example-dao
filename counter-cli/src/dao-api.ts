@@ -14,20 +14,20 @@
 // limitations under the License.
 
 import { type ContractAddress } from '@midnight-ntwrk/compact-runtime';
-import { Dao, type DaoPrivateState, daoWitnesses, VoteChoice, createDaoPrivateState, withVoteChoice } from '@midnight-ntwrk/counter-contract';
+import { Dao, type DaoPrivateState, daoWitnesses, VoteChoice, createDaoPrivateState, withVoteChoice, withCommitmentPath, type MerkleTreePath } from '@midnight-ntwrk/counter-contract';
 import { deployContract, findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
 import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
 import { type FinalizedTxData } from '@midnight-ntwrk/midnight-js-types';
 import { type Logger } from 'pino';
-import { type DaoCircuits, type DaoProviders, type DeployedDaoContract, DaoPrivateStateId, ProposalStatus, type VoteCommitmentData } from './dao-types';
-import { type Config, daoContractConfig } from './config';
+import { type DaoCircuits, type DaoProviders, type DeployedDaoContract, DaoPrivateStateId } from './dao-types.js';
+import { type Config, daoContractConfig } from './config.js';
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { assertIsContractAddress } from '@midnight-ntwrk/midnight-js-utils';
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
-import { type WalletContext, createWalletAndMidnightProvider } from './api';
-import { createHash, randomBytes } from 'crypto';
+import { type WalletContext, createWalletAndMidnightProvider } from './api.js';
+import { randomBytes } from 'crypto';
 
 type DaoContractType = Dao.Contract<DaoPrivateState>;
 
@@ -38,15 +38,22 @@ const daoCompiledContract = CompiledContract.make('dao', Dao.Contract).pipe(
   CompiledContract.withCompiledFileAssets(daoContractConfig.zkConfigPath),
 );
 
+// Proposal state enum (matches contract)
+export enum ProposalState {
+  SETUP = 0,
+  COMMIT = 1,
+  REVEAL = 2,
+  FINAL = 3,
+}
+
 export interface DaoLedgerState {
+  round: bigint;
   proposalCount: bigint;
   proposalMeta: Map<bigint, Uint8Array>;
-  proposalStatus: Map<bigint, ProposalStatus>;
-  voteCount: Map<bigint, bigint>;
-  usedNullifiers: Map<string, bigint>;  // nullifier hex -> 1 if used
-  votesYes: Map<bigint, bigint>;
-  votesNo: Map<bigint, bigint>;
-  votesAppeal: Map<bigint, bigint>;
+  proposalState: Map<bigint, ProposalState>;
+  votesYes: bigint;
+  votesNo: bigint;
+  votesAppeal: bigint;
 }
 
 export interface ProposalVotes {
@@ -65,43 +72,6 @@ export { VoteChoice, createDaoPrivateState, withVoteChoice };
 // Generate a voter secret (should be derived from wallet seed in production)
 export function generateVoterSecret(): Uint8Array {
   return randomBytes(32);
-}
-
-// Compute nullifier: hash(voterSecret || proposalId)
-// This prevents double voting while preserving anonymity
-export function computeNullifier(voterSecret: Uint8Array, proposalId: bigint): Uint8Array {
-  const proposalIdBytes = bigintToBytes32(proposalId);
-  const combined = Buffer.concat([voterSecret, proposalIdBytes]);
-  return createHash('sha256').update(combined).digest();
-}
-
-
-// Convert bigint to 32-byte buffer (little-endian)
-function bigintToBytes32(n: bigint): Buffer {
-  const buf = Buffer.alloc(32);
-  let remaining = n;
-  for (let i = 0; i < 32; i++) {
-    buf[i] = Number(remaining & 0xffn);
-    remaining >>= 8n;
-  }
-  return buf;
-}
-
-// Check if a voter has already voted on a proposal
-export async function hasVoted(
-  providers: DaoProviders,
-  contractAddress: ContractAddress,
-  voterSecret: Uint8Array,
-  proposalId: bigint,
-): Promise<boolean> {
-  const state = await getDaoLedgerState(providers, contractAddress);
-  if (!state) return false;
-  
-  const nullifier = computeNullifier(voterSecret, proposalId);
-  const nullifierHex = Buffer.from(nullifier).toString('hex');
-  
-  // Check if nullifier is marked as used
-  return state.usedNullifiers.get(nullifierHex) === 1n;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -126,48 +96,23 @@ export const getDaoLedgerState = async (
         proposalMeta.set(k, v);
       }
       
-      const proposalStatus = new Map<bigint, ProposalStatus>();
-      for (const [k, v] of ledgerState.proposalStatus) {
-        proposalStatus.set(k, Number(v) as ProposalStatus);
-      }
-      
-      const voteCount = new Map<bigint, bigint>();
-      for (const [k, v] of ledgerState.voteCount) {
-        voteCount.set(k, v);
-      }
-      
-      const usedNullifiers = new Map<string, bigint>();
-      for (const [k, v] of ledgerState.usedNullifiers) {
-        // Convert Uint8Array key to hex string
-        usedNullifiers.set(Buffer.from(k).toString('hex'), v);
-      }
-      
-      const votesYes = new Map<bigint, bigint>();
-      for (const [k, v] of ledgerState.votesYes) {
-        votesYes.set(k, v);
-      }
-      const votesNo = new Map<bigint, bigint>();
-      for (const [k, v] of ledgerState.votesNo) {
-        votesNo.set(k, v);
-      }
-      const votesAppeal = new Map<bigint, bigint>();
-      for (const [k, v] of ledgerState.votesAppeal) {
-        votesAppeal.set(k, v);
+      const proposalState = new Map<bigint, ProposalState>();
+      for (const [k, v] of ledgerState.proposalState) {
+        proposalState.set(k, v as ProposalState);
       }
       
       return {
+        round: ledgerState.round,
         proposalCount: ledgerState.proposalCount,
         proposalMeta,
-        proposalStatus,
-        voteCount,
-        usedNullifiers,
-        votesYes,
-        votesNo,
-        votesAppeal,
+        proposalState,
+        votesYes: ledgerState.votesYes,
+        votesNo: ledgerState.votesNo,
+        votesAppeal: ledgerState.votesAppeal,
       };
     });
   if (state) {
-    logger.info(`Ledger state: ${state.proposalCount} proposals`);
+    logger.info(`Ledger state: ${state.proposalCount} proposals, round ${state.round}`);
   }
   return state;
 };
@@ -175,16 +120,25 @@ export const getDaoLedgerState = async (
 export const getProposalVotes = async (
   providers: DaoProviders,
   contractAddress: ContractAddress,
-  proposalId: bigint,
 ): Promise<ProposalVotes | null> => {
   const state = await getDaoLedgerState(providers, contractAddress);
   if (!state) return null;
   
   return {
-    yes: state.votesYes.get(proposalId) ?? 0n,
-    no: state.votesNo.get(proposalId) ?? 0n,
-    appeal: state.votesAppeal.get(proposalId) ?? 0n,
+    yes: state.votesYes,
+    no: state.votesNo,
+    appeal: state.votesAppeal,
   };
+};
+
+export const getProposalState = async (
+  providers: DaoProviders,
+  contractAddress: ContractAddress,
+  proposalId: bigint,
+): Promise<ProposalState | null> => {
+  const state = await getDaoLedgerState(providers, contractAddress);
+  if (!state) return null;
+  return state.proposalState.get(proposalId) ?? null;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -231,108 +185,90 @@ export const createProposal = async (
   proposalId: bigint,
   metaHash: Uint8Array,
 ): Promise<FinalizedTxData> => {
-  logger.info(`Creating proposal ${proposalId} on-chain...`);
+  logger.info(`Creating proposal ${proposalId} on-chain (starts in COMMIT phase)...`);
   const finalizedTxData = await daoContract.callTx.create_proposal(proposalId, metaHash);
   logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };
 
-// Close a proposal and reveal final tallies
-export const closeProposal = async (
+// Advance proposal state: COMMIT -> REVEAL -> FINAL
+export const advanceProposal = async (
   daoContract: DeployedDaoContract,
   proposalId: bigint,
-  finalYes: bigint,
-  finalNo: bigint,
-  finalAppeal: bigint,
 ): Promise<FinalizedTxData> => {
-  logger.info(`Closing proposal ${proposalId} with tallies: YES=${finalYes}, NO=${finalNo}, APPEAL=${finalAppeal}...`);
-  const finalizedTxData = await daoContract.callTx.close_proposal(proposalId, finalYes, finalNo, finalAppeal);
+  logger.info(`Advancing proposal ${proposalId} to next phase...`);
+  const finalizedTxData = await daoContract.callTx.advance_proposal(proposalId);
   logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PRIVATE VOTING
+// COMMIT/REVEAL VOTING
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Cast a private vote on a proposal
-// This is the main voting function that uses ZK proofs to hide the vote
-export const castVote = async (
+// Commit phase: Submit a vote commitment (vote stays hidden)
+// The nullifier and commitment are derived INSIDE the circuit using persistentCommit
+export const voteCommit = async (
   daoContract: DeployedDaoContract,
-  providers: DaoProviders,
   proposalId: bigint,
-  voteChoice: VoteChoice,
-  voterSecret: Uint8Array,
 ): Promise<FinalizedTxData> => {
-  const contractAddress = daoContract.deployTxData.public.contractAddress;
+  logger.info(`Committing vote on proposal ${proposalId}...`);
+  logger.info(`Vote choice and nullifier are derived inside the ZK circuit`);
   
-  // Check if already voted
-  const alreadyVoted = await hasVoted(providers, contractAddress, voterSecret, proposalId);
-  if (alreadyVoted) {
-    throw new Error(`You have already voted on proposal ${proposalId}`);
-  }
+  const finalizedTxData = await daoContract.callTx.vote_commit(proposalId);
   
-  // Get current vote count for this proposal
-  const state = await getDaoLedgerState(providers, contractAddress);
-  const currentVoteCount = state?.voteCount.get(proposalId) ?? 0n;
-  
-  // Compute nullifier
-  const nullifier = computeNullifier(voterSecret, proposalId);
-  
-  logger.info(`Casting private vote on proposal ${proposalId}...`);
-  logger.info(`Nullifier: ${Buffer.from(nullifier).toString('hex').slice(0, 16)}...`);
-  logger.info(`Current vote count: ${currentVoteCount}`);
-  
-  // Call the cast_vote circuit with new signature: (proposalId, nullifier, currentVoteCount)
-  const finalizedTxData = await daoContract.callTx.cast_vote(
-    proposalId,
-    nullifier,
-    currentVoteCount,
-  );
-  
-  logger.info(`Vote cast successfully! Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
+  logger.info(`Vote committed! Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };
 
-// Convenience functions that wrap castVote with specific vote choices
+// Reveal phase: Reveal vote and increment tally
+// The tally is incremented INSIDE the circuit (cryptographically enforced)
+export const voteReveal = async (
+  daoContract: DeployedDaoContract,
+  proposalId: bigint,
+): Promise<FinalizedTxData> => {
+  logger.info(`Revealing vote on proposal ${proposalId}...`);
+  logger.info(`Tally will be incremented inside the ZK circuit`);
+  
+  const finalizedTxData = await daoContract.callTx.vote_reveal(proposalId);
+  
+  logger.info(`Vote revealed! Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
+  return finalizedTxData.public;
+};
+
+// Convenience functions for commit phase with specific vote choices
 export const voteYes = async (
   daoContract: DeployedDaoContract,
-  providers: DaoProviders,
   proposalId: bigint,
-  voterSecret: Uint8Array,
 ): Promise<FinalizedTxData> => {
-  return castVote(daoContract, providers, proposalId, VoteChoice.YES, voterSecret);
+  // Vote choice is set in private state before calling
+  return voteCommit(daoContract, proposalId);
 };
 
 export const voteNo = async (
   daoContract: DeployedDaoContract,
-  providers: DaoProviders,
   proposalId: bigint,
-  voterSecret: Uint8Array,
 ): Promise<FinalizedTxData> => {
-  return castVote(daoContract, providers, proposalId, VoteChoice.NO, voterSecret);
+  return voteCommit(daoContract, proposalId);
 };
 
 export const voteAppeal = async (
   daoContract: DeployedDaoContract,
-  providers: DaoProviders,
   proposalId: bigint,
-  voterSecret: Uint8Array,
 ): Promise<FinalizedTxData> => {
-  return castVote(daoContract, providers, proposalId, VoteChoice.APPEAL, voterSecret);
+  return voteCommit(daoContract, proposalId);
 };
 
 export const displayVoteResults = async (
   providers: DaoProviders,
   daoContract: DeployedDaoContract,
-  proposalId: bigint,
 ): Promise<ProposalVotes | null> => {
   const contractAddress = daoContract.deployTxData.public.contractAddress;
-  const votes = await getProposalVotes(providers, contractAddress, proposalId);
+  const votes = await getProposalVotes(providers, contractAddress);
   if (votes === null) {
-    logger.info(`No votes found for proposal ${proposalId}.`);
+    logger.info(`No vote tallies found.`);
   } else {
-    logger.info(`Vote Results for Proposal ${proposalId} - Yes: ${votes.yes}, No: ${votes.no}, Appeal: ${votes.appeal}`);
+    logger.info(`Vote Results - Yes: ${votes.yes}, No: ${votes.no}, Appeal: ${votes.appeal}`);
   }
   return votes;
 };

@@ -66,18 +66,26 @@ ${DIVIDER}
 ${'─'.repeat(62)}
 > `;
 
-const votingMenu = (proposal: ProposalMetadata, dustBalance: string) => `
+const votingMenu = (proposal: ProposalMetadata, dustBalance: string, proposalState: string) => `
 ${DIVIDER}
   Proposal: ${proposal.policyTitle}${dustBalance ? `          DUST: ${dustBalance}` : ''}
+  Phase: ${proposalState}
 ${DIVIDER}
   Type: ${proposal.policyType}
   Description: ${proposal.policyDescription}
 ${DIVIDER}
-  [1] Vote YES
-  [2] Vote NO
-  [3] Vote APPEAL
-  [4] View Results
-  [5] Back to Main Menu
+  COMMIT PHASE (vote stays hidden):
+  [1] Commit YES vote
+  [2] Commit NO vote
+  [3] Commit APPEAL vote
+  
+  REVEAL PHASE (reveals vote & updates tally):
+  [4] Reveal my vote
+  
+  ADMIN:
+  [5] Advance to next phase
+  [6] View Results
+  [7] Back to Main Menu
 ${'─'.repeat(62)}
 > `;
 
@@ -297,13 +305,13 @@ const deployOrJoin = async (
   }
 };
 
-const displayResults = async (providers: DaoProviders, contract: DeployedDaoContract, proposalId: bigint): Promise<void> => {
-  const votes = await daoApi.displayVoteResults(providers, contract, proposalId);
+const displayResults = async (providers: DaoProviders, contract: DeployedDaoContract): Promise<void> => {
+  const votes = await daoApi.displayVoteResults(providers, contract);
   if (votes) {
     const total = Number(votes.yes) + Number(votes.no) + Number(votes.appeal);
     console.log(`
 ${DIVIDER}
-  Vote Results for Proposal ${proposalId}
+  Vote Results (Global Tallies)
 ${DIVIDER}
   YES:    ${votes.yes}
   NO:     ${votes.no}
@@ -327,50 +335,65 @@ const votingLoop = async (
   
   while (true) {
     const dustLabel = await getDustLabel(walletCtx.wallet);
-    const choice = await rli.question(votingMenu(metadata, dustLabel));
     
-    // Get current vote counts before voting
-    const getCurrentVotes = async (voteType: 'yes' | 'no' | 'appeal'): Promise<bigint> => {
-      const votes = await daoApi.getProposalVotes(providers, contractAddress, proposalId);
-      if (!votes) return 0n;
-      return voteType === 'yes' ? votes.yes : voteType === 'no' ? votes.no : votes.appeal;
-    };
+    // Get current proposal state
+    const proposalState = await daoApi.getProposalState(providers, contractAddress, proposalId);
+    const stateLabel = proposalState !== null 
+      ? ['SETUP', 'COMMIT', 'REVEAL', 'FINAL'][proposalState] 
+      : 'UNKNOWN';
+    
+    const choice = await rli.question(votingMenu(metadata, dustLabel, stateLabel));
     
     switch (choice.trim()) {
-      case '1':
+      case '1': // Commit YES vote
         try {
-          await api.withStatus('Voting YES', () => daoApi.voteYes(contract, providers, proposalId, voterSecret));
-          console.log('  ✓ Vote submitted successfully!\n');
-          return true;
+          await api.withStatus('Committing YES vote', () => daoApi.voteYes(contract, proposalId));
+          console.log('  ✓ Vote committed! Remember to reveal during REVEAL phase.\n');
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          console.log(`  ✗ Vote failed: ${msg}\n`);
+          console.log(`  ✗ Commit failed: ${msg}\n`);
         }
         break;
-      case '2':
+      case '2': // Commit NO vote
         try {
-          await api.withStatus('Voting NO', () => daoApi.voteNo(contract, providers, proposalId, voterSecret));
-          console.log('  ✓ Vote submitted successfully!\n');
-          return true;
+          await api.withStatus('Committing NO vote', () => daoApi.voteNo(contract, proposalId));
+          console.log('  ✓ Vote committed! Remember to reveal during REVEAL phase.\n');
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          console.log(`  ✗ Vote failed: ${msg}\n`);
+          console.log(`  ✗ Commit failed: ${msg}\n`);
         }
         break;
-      case '3':
+      case '3': // Commit APPEAL vote
         try {
-          await api.withStatus('Voting APPEAL', () => daoApi.voteAppeal(contract, providers, proposalId, voterSecret));
-          console.log('  ✓ Vote submitted successfully!\n');
-          return true;
+          await api.withStatus('Committing APPEAL vote', () => daoApi.voteAppeal(contract, proposalId));
+          console.log('  ✓ Vote committed! Remember to reveal during REVEAL phase.\n');
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          console.log(`  ✗ Vote failed: ${msg}\n`);
+          console.log(`  ✗ Commit failed: ${msg}\n`);
         }
         break;
-      case '4':
-        await displayResults(providers, contract, proposalId);
+      case '4': // Reveal vote
+        try {
+          await api.withStatus('Revealing vote', () => daoApi.voteReveal(contract, proposalId));
+          console.log('  ✓ Vote revealed and tally updated!\n');
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.log(`  ✗ Reveal failed: ${msg}\n`);
+        }
         break;
-      case '5':
+      case '5': // Advance proposal phase
+        try {
+          await api.withStatus('Advancing proposal phase', () => daoApi.advanceProposal(contract, proposalId));
+          console.log('  ✓ Proposal advanced to next phase!\n');
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.log(`  ✗ Advance failed: ${msg}\n`);
+        }
+        break;
+      case '6': // View results
+        await displayResults(providers, contract);
+        break;
+      case '7': // Back
         return true;
       default:
         console.log(`  Invalid choice: ${choice}`);

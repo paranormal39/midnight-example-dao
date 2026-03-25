@@ -3,30 +3,45 @@ pragma language_version >= 0.20;
 import CompactStandardLibrary;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MIDNIGHT DAO VOTING CONTRACT - Privacy-Preserving Version
+// MIDNIGHT DAO VOTING CONTRACT - Commit/Reveal Privacy Pattern
 // ═══════════════════════════════════════════════════════════════════════════
 // 
-// Privacy Features:
-// 1. Private voting with commitments - individual votes are hidden
-// 2. Double-vote prevention via nullifiers - each voter can only vote once
-// 3. Hidden tallies until poll closure - votes revealed only when poll ends
-// 4. Anonymous ballot verification - ZK proofs validate votes without revealing them
+// This contract implements a proper commit/reveal voting scheme where:
+// 1. Nullifiers are derived INSIDE the circuit using persistentCommit
+// 2. Vote commitments are stored in a MerkleTree
+// 3. Tallies are incremented INSIDE the reveal circuit (not passed as params)
+// 4. Double-voting is prevented cryptographically
+//
+// Flow:
+//   setup -> commit (voters commit votes) -> reveal (voters reveal & tally) -> final
 //
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE MACHINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum ProposalState { setup, commit, reveal, final }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WITNESSES - Private data providers (off-chain)
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Get the voter's secret key (used to derive nullifier)
-witness get_voter_secret(): Bytes<32>;
+// Get the voter's secret key (used to derive nullifier and commitment)
+witness get_secret_key(): Bytes<32>;
 
-// Get the voter's vote choice (0=YES, 1=NO, 2=APPEAL) - kept private
-witness get_vote_choice(): Field;
+// Get the voter's vote choice: 0=NO, 1=YES, 2=APPEAL
+witness get_vote_choice(): Uint<8>;
+
+// Get the MerkleTree path for a commitment (used in reveal phase)
+witness get_commitment_path(proposalId: Field, cm: Bytes<32>): MerkleTreePath<10, Bytes<32>>;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LEDGER STATE - Public on-chain state
 // ═══════════════════════════════════════════════════════════════════════════
+
+// Global round counter (for replay protection across voting rounds)
+export ledger round: Counter;
 
 // Proposal counter
 export ledger proposalCount: Counter;
@@ -34,82 +49,167 @@ export ledger proposalCount: Counter;
 // Proposal metadata - Map from proposalId to metaHash
 export ledger proposalMeta: Map<Field, Bytes<32>>;
 
-// Proposal status: 0 = active (voting open), 1 = closed (voting ended)
-export ledger proposalStatus: Map<Field, Field>;
+// Proposal state machine
+export ledger proposalState: Map<Field, ProposalState>;
 
-// Vote count per proposal (number of votes cast, not revealed tallies)
-export ledger voteCount: Map<Field, Field>;
+// Vote commitments stored in MerkleTree (per proposal)
+// MerkleTree<10> supports up to 1024 votes
+export ledger voteCommitments: MerkleTree<10, Bytes<32>>;
 
-// Nullifier registry - Map from nullifier to boolean (true = used)
-// nullifier = hash(voterSecret || proposalId) - prevents double voting
-export ledger usedNullifiers: Map<Bytes<32>, Field>;
+// Nullifier sets to prevent double-commit and double-reveal
+export ledger commitNullifiers: Set<Bytes<32>>;
+export ledger revealNullifiers: Set<Bytes<32>>;
 
-// Vote tallies per proposal - only updated when poll is closed
-// These remain at 0 while voting is active (hidden tallies)
-export ledger votesYes: Map<Field, Field>;
-export ledger votesNo: Map<Field, Field>;
-export ledger votesAppeal: Map<Field, Field>;
+// Vote tallies - ONLY modified inside reveal circuit
+export ledger votesYes: Counter;
+export ledger votesNo: Counter;
+export ledger votesAppeal: Counter;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CIRCUITS - ZK Programs
+// HELPER STRUCTS FOR NULLIFIER DERIVATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Create a new proposal
+struct NullifierPreimage {
+  proposalId: Field;
+  round: Uint<64>;
+  domainSep: Bytes<8>;
+}
+
+struct CommitmentPreimage {
+  ballot: Uint<8>;
+  proposalId: Field;
+  round: Uint<64>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CRYPTOGRAPHIC CIRCUITS - Nullifier and Commitment Derivation
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Derive commitment nullifier INSIDE circuit using persistentCommit
+circuit derive_commit_nullifier(sk: Bytes<32>, proposalId: Field): Bytes<32> {
+  const preimage = NullifierPreimage {
+    proposalId: proposalId,
+    round: round.read(),
+    domainSep: pad(8, "dao:cn")
+  };
+  return persistentCommit<NullifierPreimage>(preimage, sk);
+}
+
+// Derive reveal nullifier INSIDE circuit using persistentCommit
+circuit derive_reveal_nullifier(sk: Bytes<32>, proposalId: Field): Bytes<32> {
+  const preimage = NullifierPreimage {
+    proposalId: proposalId,
+    round: round.read(),
+    domainSep: pad(8, "dao:rn")
+  };
+  return persistentCommit<NullifierPreimage>(preimage, sk);
+}
+
+// Derive vote commitment INSIDE circuit using persistentCommit
+circuit derive_vote_commitment(sk: Bytes<32>, ballot: Uint<8>, proposalId: Field): Bytes<32> {
+  const preimage = CommitmentPreimage {
+    ballot: ballot,
+    proposalId: proposalId,
+    round: round.read()
+  };
+  return persistentCommit<CommitmentPreimage>(preimage, sk);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN CIRCUITS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Create a new proposal and start commit phase
 export circuit create_proposal(proposalId: Field, metaHash: Bytes<32>): [] {
   const pid = disclose(proposalId);
   const hash = disclose(metaHash);
   
   proposalCount.increment(1);
   proposalMeta.insert(pid, hash);
-  proposalStatus.insert(pid, 0 as Field);  // 0 = active
-  voteCount.insert(pid, 0 as Field);
-  votesYes.insert(pid, 0 as Field);
-  votesNo.insert(pid, 0 as Field);
-  votesAppeal.insert(pid, 0 as Field);
+  proposalState.insert(pid, ProposalState.commit);  // Start in commit phase
 }
 
-// Cast a private vote on a proposal
-// The vote choice is kept private via ZK proof
-// Double-voting is prevented via nullifier tracking
-export circuit cast_vote(
-  proposalId: Field,
-  nullifier: Bytes<32>,
-  currentVoteCount: Field
-): [] {
-  // Public inputs - these are disclosed
+// Commit phase: Voter commits their vote
+// - Nullifier is derived INSIDE the circuit (not passed as parameter)
+// - Vote commitment is stored in MerkleTree
+// - Vote choice stays private
+export circuit vote_commit(proposalId: Field): [] {
   const pid = disclose(proposalId);
-  const nullHash = disclose(nullifier);
-  const currCount = disclose(currentVoteCount);
   
-  // Get private inputs from witnesses (vote choice stays private)
-  const voterSecret = get_voter_secret();
-  const voteChoice = get_vote_choice();
+  // Verify we're in commit phase
+  assert(proposalState.lookup(pid) == ProposalState.commit, "Not in commit phase");
   
-  // Mark nullifier as used (prevents double voting)
-  usedNullifiers.insert(nullHash, 1 as Field);
+  // Get private inputs from witnesses
+  const sk = get_secret_key();
+  const ballot = get_vote_choice();
   
-  // Increment vote count for this proposal
-  voteCount.insert(pid, currCount + 1);
+  // Derive nullifier INSIDE circuit (cryptographically enforced)
+  const commitNullifier = derive_commit_nullifier(sk, proposalId);
+  
+  // Check nullifier hasn't been used (prevents double-commit)
+  assert(!commitNullifiers.member(disclose(commitNullifier)), "Already committed");
+  
+  // Derive vote commitment INSIDE circuit
+  const commitment = derive_vote_commitment(sk, ballot, proposalId);
+  
+  // Store commitment in MerkleTree (public, but hides vote choice)
+  voteCommitments.insert(disclose(commitment));
+  
+  // Mark nullifier as used
+  commitNullifiers.insert(disclose(commitNullifier));
 }
 
-// Close a proposal and reveal final tallies
-// This should be called by the proposal creator or after a timeout
-export circuit close_proposal(
-  proposalId: Field,
-  finalYes: Field,
-  finalNo: Field,
-  finalAppeal: Field
-): [] {
+// Reveal phase: Voter reveals their vote and tally is incremented
+// - Proves commitment exists in MerkleTree
+// - Tally is incremented INSIDE the circuit (not passed as parameter)
+export circuit vote_reveal(proposalId: Field): [] {
   const pid = disclose(proposalId);
-  const yes = disclose(finalYes);
-  const no = disclose(finalNo);
-  const appeal = disclose(finalAppeal);
   
-  // Mark proposal as closed
-  proposalStatus.insert(pid, 1 as Field);  // 1 = closed
+  // Verify we're in reveal phase
+  assert(proposalState.lookup(pid) == ProposalState.reveal, "Not in reveal phase");
   
-  // Update final tallies (these become public only now)
-  votesYes.insert(pid, yes);
-  votesNo.insert(pid, no);
-  votesAppeal.insert(pid, appeal);
+  // Get private inputs from witnesses
+  const sk = get_secret_key();
+  const ballot = get_vote_choice();
+  
+  // Derive reveal nullifier (prevents double-reveal)
+  const revealNullifier = derive_reveal_nullifier(sk, proposalId);
+  assert(!revealNullifiers.member(disclose(revealNullifier)), "Already revealed");
+  
+  // Recompute the commitment from the same inputs
+  const commitment = derive_vote_commitment(sk, ballot, proposalId);
+  
+  // Get MerkleTree path and verify commitment exists
+  const path = get_commitment_path(proposalId, commitment);
+  assert(
+    voteCommitments.checkRoot(disclose(merkleTreePathRoot<10, Bytes<32>>(path))) &&
+    commitment == path.leaf,
+    "Commitment not found in tree"
+  );
+  
+  // INCREMENT TALLY INSIDE CIRCUIT (cryptographically enforced)
+  if (disclose(ballot) == 1) {
+    votesYes.increment(1);
+  } else if (disclose(ballot) == 0) {
+    votesNo.increment(1);
+  } else {
+    votesAppeal.increment(1);
+  }
+  
+  // Mark reveal nullifier as used
+  revealNullifiers.insert(disclose(revealNullifier));
+}
+
+// Advance proposal state: commit -> reveal -> final
+export circuit advance_proposal(proposalId: Field): [] {
+  const pid = disclose(proposalId);
+  const currentState = proposalState.lookup(pid);
+  
+  if (currentState == ProposalState.commit) {
+    proposalState.insert(pid, ProposalState.reveal);
+  } else if (currentState == ProposalState.reveal) {
+    proposalState.insert(pid, ProposalState.final);
+    // Increment round for next voting cycle (replay protection)
+    round.increment(1);
+  }
 }

@@ -26,40 +26,35 @@ import {
 } from "../managed/dao/contract/index.js";
 import { 
   type DaoPrivateState, 
+  type MerkleTreePath,
   daoWitnesses, 
   VoteChoice,
   createDaoPrivateState,
-  withVoteChoice 
+  withVoteChoice,
+  withCommitmentPath
 } from "../dao-witnesses.js";
-import { createHash, randomBytes } from "crypto";
+import { randomBytes } from "crypto";
 
-// Helper to compute nullifier (must match contract logic)
-export function computeNullifier(voterSecret: Uint8Array, proposalId: bigint): Uint8Array {
-  const proposalIdBytes = bigintToBytes32(proposalId);
-  const combined = Buffer.concat([voterSecret, proposalIdBytes]);
-  return createHash('sha256').update(combined).digest();
-}
-
-// Convert bigint to 32-byte buffer (little-endian)
-function bigintToBytes32(n: bigint): Buffer {
-  const buf = Buffer.alloc(32);
-  let remaining = n;
-  for (let i = 0; i < 32; i++) {
-    buf[i] = Number(remaining & 0xffn);
-    remaining >>= 8n;
-  }
-  return buf;
+// Proposal state enum (must match contract)
+export enum ProposalState {
+  SETUP = 0,
+  COMMIT = 1,
+  REVEAL = 2,
+  FINAL = 3,
 }
 
 export class DaoSimulator {
   readonly contract: Contract<DaoPrivateState>;
   circuitContext: CircuitContext<DaoPrivateState>;
-  private voterSecret: Uint8Array;
+  private secretKey: Uint8Array;
+  
+  // Track commitments for building MerkleTree paths
+  private commitmentsList: Uint8Array[] = [];
 
-  constructor(voterSecret?: Uint8Array) {
-    this.voterSecret = voterSecret ?? randomBytes(32);
+  constructor(secretKey?: Uint8Array) {
+    this.secretKey = secretKey ?? randomBytes(32);
     this.contract = new Contract<DaoPrivateState>(daoWitnesses);
-    const initialPrivateState = createDaoPrivateState(this.voterSecret);
+    const initialPrivateState = createDaoPrivateState(this.secretKey);
     
     const {
       currentPrivateState,
@@ -84,10 +79,11 @@ export class DaoSimulator {
     return this.circuitContext.currentPrivateState;
   }
 
-  public getVoterSecret(): Uint8Array {
-    return this.voterSecret;
+  public getSecretKey(): Uint8Array {
+    return this.secretKey;
   }
 
+  // Create a new proposal (starts in commit phase)
   public createProposal(proposalId: bigint, metaHash: Uint8Array): Ledger {
     this.circuitContext = this.contract.impureCircuits.create_proposal(
       this.circuitContext,
@@ -97,7 +93,8 @@ export class DaoSimulator {
     return this.getLedger();
   }
 
-  public castVote(proposalId: bigint, voteChoice: VoteChoice): Ledger {
+  // Commit phase: voter commits their vote
+  public voteCommit(proposalId: bigint, voteChoice: VoteChoice): Ledger {
     // Update private state with vote choice
     const updatedPrivateState = withVoteChoice(
       this.circuitContext.currentPrivateState,
@@ -108,49 +105,89 @@ export class DaoSimulator {
       currentPrivateState: updatedPrivateState
     };
 
-    // Compute nullifier
-    const nullifier = computeNullifier(this.voterSecret, proposalId);
-    
-    // Get current vote count
-    const currentVoteCount = this.getLedger().voteCount.lookup(proposalId) ?? 0n;
-
-    // Call the circuit
-    this.circuitContext = this.contract.impureCircuits.cast_vote(
+    // Call the vote_commit circuit
+    this.circuitContext = this.contract.impureCircuits.vote_commit(
       this.circuitContext,
-      proposalId,
-      nullifier,
-      currentVoteCount
+      proposalId
     ).context;
     
     return this.getLedger();
   }
 
-  public closeProposal(
-    proposalId: bigint,
-    finalYes: bigint,
-    finalNo: bigint,
-    finalAppeal: bigint
-  ): Ledger {
-    this.circuitContext = this.contract.impureCircuits.close_proposal(
+  // Reveal phase: voter reveals their vote and tally is incremented
+  public voteReveal(proposalId: bigint, voteChoice: VoteChoice, commitmentPath: MerkleTreePath): Ledger {
+    // Update private state with vote choice and commitment path
+    let updatedPrivateState = withVoteChoice(
+      this.circuitContext.currentPrivateState,
+      voteChoice
+    );
+    updatedPrivateState = withCommitmentPath(
+      updatedPrivateState,
+      commitmentPath.leaf,
+      commitmentPath
+    );
+    this.circuitContext = {
+      ...this.circuitContext,
+      currentPrivateState: updatedPrivateState
+    };
+
+    // Call the vote_reveal circuit
+    this.circuitContext = this.contract.impureCircuits.vote_reveal(
       this.circuitContext,
-      proposalId,
-      finalYes,
-      finalNo,
-      finalAppeal
+      proposalId
+    ).context;
+    
+    return this.getLedger();
+  }
+
+  // Advance proposal state: commit -> reveal -> final
+  public advanceProposal(proposalId: bigint): Ledger {
+    this.circuitContext = this.contract.impureCircuits.advance_proposal(
+      this.circuitContext,
+      proposalId
     ).context;
     return this.getLedger();
   }
 
-  // Helper to check if a nullifier has been used
-  public isNullifierUsed(nullifier: Uint8Array): boolean {
+  // Get proposal state (returns number: 0=setup, 1=commit, 2=reveal, 3=final)
+  public getProposalState(proposalId: bigint): ProposalState | undefined {
     const ledgerState = this.getLedger();
-    const used = ledgerState.usedNullifiers.lookup(nullifier);
-    return used !== undefined && used === 1n;
+    if (!ledgerState.proposalState.member(proposalId)) return undefined;
+    const state = ledgerState.proposalState.lookup(proposalId);
+    return state as ProposalState;
   }
 
-  // Helper to get vote count for a proposal
-  public getVoteCount(proposalId: bigint): bigint {
+  // Get vote tallies
+  public getVoteTallies(): { yes: bigint; no: bigint; appeal: bigint } {
     const ledgerState = this.getLedger();
-    return ledgerState.voteCount.lookup(proposalId) ?? 0n;
+    return {
+      yes: ledgerState.votesYes,
+      no: ledgerState.votesNo,
+      appeal: ledgerState.votesAppeal,
+    };
+  }
+
+  // Check if a commit nullifier has been used
+  public isCommitNullifierUsed(nullifier: Uint8Array): boolean {
+    const ledgerState = this.getLedger();
+    return ledgerState.commitNullifiers.member(nullifier);
+  }
+
+  // Check if a reveal nullifier has been used
+  public isRevealNullifierUsed(nullifier: Uint8Array): boolean {
+    const ledgerState = this.getLedger();
+    return ledgerState.revealNullifiers.member(nullifier);
+  }
+
+  // Get current round
+  public getRound(): bigint {
+    const ledgerState = this.getLedger();
+    return ledgerState.round;
+  }
+
+  // Get proposal count
+  public getProposalCount(): bigint {
+    const ledgerState = this.getLedger();
+    return ledgerState.proposalCount;
   }
 }
