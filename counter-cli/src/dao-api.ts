@@ -49,17 +49,23 @@ export enum ProposalState {
 export interface DaoLedgerState {
   round: bigint;
   proposalCount: bigint;
+  adminNonce: bigint;
   proposalMeta: Map<bigint, Uint8Array>;
   proposalState: Map<bigint, ProposalState>;
-  votesYes: bigint;
-  votesNo: bigint;
-  votesAppeal: bigint;
+  currentBlockHeight: bigint;
 }
 
 export interface ProposalVotes {
   yes: bigint;
   no: bigint;
   appeal: bigint;
+  total: bigint;
+  quorumReached: boolean;
+}
+
+export interface ProposalDeadlines {
+  commitDeadline: bigint;
+  revealDeadline: bigint;
 }
 
 // Re-export for convenience
@@ -101,18 +107,22 @@ export const getDaoLedgerState = async (
         proposalState.set(k, v as ProposalState);
       }
       
+      // Get current block height from Map (key 0)
+      const currentBlockHeight = ledgerState.currentBlockHeight.member(0n) 
+        ? ledgerState.currentBlockHeight.lookup(0n) 
+        : 0n;
+      
       return {
         round: ledgerState.round,
         proposalCount: ledgerState.proposalCount,
+        adminNonce: ledgerState.adminNonce,
         proposalMeta,
         proposalState,
-        votesYes: ledgerState.votesYes,
-        votesNo: ledgerState.votesNo,
-        votesAppeal: ledgerState.votesAppeal,
+        currentBlockHeight,
       };
     });
   if (state) {
-    logger.info(`Ledger state: ${state.proposalCount} proposals, round ${state.round}`);
+    logger.info(`Ledger state: ${state.proposalCount} proposals, round ${state.round}, block ${state.currentBlockHeight}`);
   }
   return state;
 };
@@ -120,14 +130,37 @@ export const getDaoLedgerState = async (
 export const getProposalVotes = async (
   providers: DaoProviders,
   contractAddress: ContractAddress,
+  proposalId: bigint,
 ): Promise<ProposalVotes | null> => {
-  const state = await getDaoLedgerState(providers, contractAddress);
-  if (!state) return null;
+  assertIsContractAddress(contractAddress);
+  const contractState = await providers.publicDataProvider.queryContractState(contractAddress);
+  if (!contractState) return null;
+  
+  const ledgerState = Dao.ledger(contractState.data);
   
   return {
-    yes: state.votesYes,
-    no: state.votesNo,
-    appeal: state.votesAppeal,
+    yes: ledgerState.proposalVotesYes.member(proposalId) ? ledgerState.proposalVotesYes.lookup(proposalId) : 0n,
+    no: ledgerState.proposalVotesNo.member(proposalId) ? ledgerState.proposalVotesNo.lookup(proposalId) : 0n,
+    appeal: ledgerState.proposalVotesAppeal.member(proposalId) ? ledgerState.proposalVotesAppeal.lookup(proposalId) : 0n,
+    total: ledgerState.proposalTotalVotes.member(proposalId) ? ledgerState.proposalTotalVotes.lookup(proposalId) : 0n,
+    quorumReached: ledgerState.proposalQuorumReached.member(proposalId) ? ledgerState.proposalQuorumReached.lookup(proposalId) : false,
+  };
+};
+
+export const getProposalDeadlines = async (
+  providers: DaoProviders,
+  contractAddress: ContractAddress,
+  proposalId: bigint,
+): Promise<ProposalDeadlines | null> => {
+  assertIsContractAddress(contractAddress);
+  const contractState = await providers.publicDataProvider.queryContractState(contractAddress);
+  if (!contractState) return null;
+  
+  const ledgerState = Dao.ledger(contractState.data);
+  
+  return {
+    commitDeadline: ledgerState.commitDeadline.member(proposalId) ? ledgerState.commitDeadline.lookup(proposalId) : 0n,
+    revealDeadline: ledgerState.revealDeadline.member(proposalId) ? ledgerState.revealDeadline.lookup(proposalId) : 0n,
   };
 };
 
@@ -184,20 +217,71 @@ export const createProposal = async (
   daoContract: DeployedDaoContract,
   proposalId: bigint,
   metaHash: Uint8Array,
+  commitDuration: bigint = 100n,
+  revealDuration: bigint = 100n,
 ): Promise<FinalizedTxData> => {
   logger.info(`Creating proposal ${proposalId} on-chain (starts in COMMIT phase)...`);
-  const finalizedTxData = await daoContract.callTx.create_proposal(proposalId, metaHash);
+  logger.info(`Commit duration: ${commitDuration} blocks, Reveal duration: ${revealDuration} blocks`);
+  const finalizedTxData = await daoContract.callTx.create_proposal(proposalId, metaHash, commitDuration, revealDuration);
   logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };
 
-// Advance proposal state: COMMIT -> REVEAL -> FINAL
-export const advanceProposal = async (
+// Advance proposal state by time (after deadline passes)
+export const advanceProposalByTime = async (
   daoContract: DeployedDaoContract,
   proposalId: bigint,
 ): Promise<FinalizedTxData> => {
-  logger.info(`Advancing proposal ${proposalId} to next phase...`);
-  const finalizedTxData = await daoContract.callTx.advance_proposal(proposalId);
+  logger.info(`Advancing proposal ${proposalId} by time (deadline passed)...`);
+  const finalizedTxData = await daoContract.callTx.advance_proposal_by_time(proposalId);
+  logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
+  return finalizedTxData.public;
+};
+
+// Advance proposal state with multi-sig (before deadline)
+export const advanceProposalMultisig = async (
+  daoContract: DeployedDaoContract,
+  proposalId: bigint,
+  sig0: Uint8Array,
+  sig1: Uint8Array,
+): Promise<FinalizedTxData> => {
+  logger.info(`Advancing proposal ${proposalId} with multi-sig...`);
+  const finalizedTxData = await daoContract.callTx.advance_proposal_multisig(proposalId, sig0, sig1);
+  logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
+  return finalizedTxData.public;
+};
+
+// Initialize DAO with admin keys
+export const initializeDao = async (
+  daoContract: DeployedDaoContract,
+  admin0: Uint8Array,
+  admin1: Uint8Array,
+  admin2: Uint8Array,
+): Promise<FinalizedTxData> => {
+  logger.info(`Initializing DAO with admin keys...`);
+  const finalizedTxData = await daoContract.callTx.initialize_dao(admin0, admin1, admin2);
+  logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
+  return finalizedTxData.public;
+};
+
+// Add eligible voter
+export const addEligibleVoter = async (
+  daoContract: DeployedDaoContract,
+  voterPubKey: Uint8Array,
+): Promise<FinalizedTxData> => {
+  logger.info(`Adding eligible voter...`);
+  const finalizedTxData = await daoContract.callTx.add_eligible_voter(voterPubKey);
+  logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
+  return finalizedTxData.public;
+};
+
+// Update block height
+export const updateBlockHeight = async (
+  daoContract: DeployedDaoContract,
+  newHeight: bigint,
+): Promise<FinalizedTxData> => {
+  logger.info(`Updating block height to ${newHeight}...`);
+  const finalizedTxData = await daoContract.callTx.update_block_height(newHeight);
   logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };
@@ -262,13 +346,16 @@ export const voteAppeal = async (
 export const displayVoteResults = async (
   providers: DaoProviders,
   daoContract: DeployedDaoContract,
+  proposalId: bigint,
 ): Promise<ProposalVotes | null> => {
   const contractAddress = daoContract.deployTxData.public.contractAddress;
-  const votes = await getProposalVotes(providers, contractAddress);
+  const votes = await getProposalVotes(providers, contractAddress, proposalId);
   if (votes === null) {
-    logger.info(`No vote tallies found.`);
+    logger.info(`No vote tallies found for proposal ${proposalId}.`);
   } else {
-    logger.info(`Vote Results - Yes: ${votes.yes}, No: ${votes.no}, Appeal: ${votes.appeal}`);
+    logger.info(`Vote Results for Proposal ${proposalId}:`);
+    logger.info(`  Yes: ${votes.yes}, No: ${votes.no}, Appeal: ${votes.appeal}`);
+    logger.info(`  Total: ${votes.total}, Quorum Reached: ${votes.quorumReached}`);
   }
   return votes;
 };

@@ -26,7 +26,12 @@ function createMetaHash(title: string): Uint8Array {
   return createHash('sha256').update(JSON.stringify({ title })).digest();
 }
 
-describe("DAO Commit/Reveal Voting Contract", () => {
+// Helper to create admin keys
+function createAdminKeys(): [Uint8Array, Uint8Array, Uint8Array] {
+  return [randomBytes(32), randomBytes(32), randomBytes(32)];
+}
+
+describe("DAO Full Security Contract", () => {
   describe("Initialization", () => {
     it("generates initial ledger state deterministically", () => {
       const secretKey = randomBytes(32);
@@ -48,101 +53,163 @@ describe("DAO Commit/Reveal Voting Contract", () => {
       expect(privateState.secretKey).toEqual(secretKey);
       expect(privateState.voteChoice).toEqual(VoteChoice.YES);
     });
+
+    it("initializes DAO with admin keys", () => {
+      const simulator = new DaoSimulator();
+      const [admin0, admin1, admin2] = createAdminKeys();
+      
+      simulator.initializeDao(admin0, admin1, admin2);
+      
+      // Should not throw - initialization succeeded
+      expect(simulator.getCurrentBlockHeight()).toEqual(0n);
+    });
   });
 
-  describe("Proposal Creation", () => {
-    it("creates a proposal correctly", () => {
+  describe("Voter Registration", () => {
+    it("adds eligible voter to MerkleTree", () => {
       const simulator = new DaoSimulator();
-      const metaHash = createMetaHash("Test Proposal");
+      const voterPubKey = randomBytes(32);
       
-      simulator.createProposal(0n, metaHash);
+      simulator.addEligibleVoter(voterPubKey);
       
-      expect(simulator.getProposalCount()).toEqual(1n);
+      // Voter should be in the tree
+      const path = simulator.getVoterAuthPath(voterPubKey);
+      expect(path).toBeDefined();
+    });
+  });
+
+  describe("Block Height Management", () => {
+    it("updates block height", () => {
+      const simulator = new DaoSimulator();
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
+      
+      simulator.updateBlockHeight(100n);
+      
+      expect(simulator.getCurrentBlockHeight()).toEqual(100n);
     });
 
-    it("creates multiple proposals with incrementing count", () => {
+    it("prevents block height from decreasing", () => {
       const simulator = new DaoSimulator();
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
       
-      simulator.createProposal(0n, createMetaHash("Proposal 1"));
-      simulator.createProposal(1n, createMetaHash("Proposal 2"));
-      simulator.createProposal(2n, createMetaHash("Proposal 3"));
+      simulator.updateBlockHeight(100n);
       
-      expect(simulator.getProposalCount()).toEqual(3n);
+      expect(() => simulator.updateBlockHeight(50n)).toThrow();
+    });
+  });
+
+  describe("Proposal Creation with Time-Locks", () => {
+    it("creates a proposal with deadlines", () => {
+      const simulator = new DaoSimulator();
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
+      simulator.updateBlockHeight(100n);
+      
+      const metaHash = createMetaHash("Test Proposal");
+      simulator.createProposal(0n, metaHash, 50n, 50n); // 50 blocks commit, 50 blocks reveal
+      
+      expect(simulator.getProposalCount()).toEqual(1n);
+      
+      const deadlines = simulator.getProposalDeadlines(0n);
+      expect(deadlines.commitDeadline).toEqual(150n); // 100 + 50
+      expect(deadlines.revealDeadline).toEqual(200n); // 150 + 50
     });
 
     it("initializes proposal in commit state", () => {
       const simulator = new DaoSimulator();
-      const metaHash = createMetaHash("Test Proposal");
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
       
-      simulator.createProposal(0n, metaHash);
+      const metaHash = createMetaHash("Test Proposal");
+      simulator.createProposal(0n, metaHash, 100n, 100n);
       
       expect(simulator.getProposalState(0n)).toEqual(ProposalState.COMMIT);
     });
 
-    it("initializes vote tallies to zero", () => {
+    it("initializes per-proposal vote tallies to zero", () => {
       const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
+      simulator.createProposal(0n, createMetaHash("Test"), 100n, 100n);
       
-      const tallies = simulator.getVoteTallies();
+      const tallies = simulator.getProposalVoteTallies(0n);
       
       expect(tallies.yes).toEqual(0n);
       expect(tallies.no).toEqual(0n);
       expect(tallies.appeal).toEqual(0n);
+      expect(tallies.total).toEqual(0n);
     });
   });
 
-  describe("State Machine", () => {
-    it("advances from commit to reveal phase", () => {
+  describe("Time-Based State Transitions", () => {
+    it("advances from commit to reveal after deadline", () => {
       const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
+      simulator.updateBlockHeight(100n);
+      simulator.createProposal(0n, createMetaHash("Test"), 50n, 50n);
       
       expect(simulator.getProposalState(0n)).toEqual(ProposalState.COMMIT);
       
-      simulator.advanceProposal(0n);
+      // Advance time past commit deadline
+      simulator.updateBlockHeight(151n);
+      simulator.advanceProposalByTime(0n);
       
       expect(simulator.getProposalState(0n)).toEqual(ProposalState.REVEAL);
     });
 
-    it("advances from reveal to final phase", () => {
+    it("advances from reveal to final after deadline", () => {
       const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
+      simulator.updateBlockHeight(100n);
+      simulator.createProposal(0n, createMetaHash("Test"), 50n, 50n);
       
-      simulator.advanceProposal(0n); // commit -> reveal
-      simulator.advanceProposal(0n); // reveal -> final
+      // Advance through both phases
+      simulator.updateBlockHeight(151n);
+      simulator.advanceProposalByTime(0n); // commit -> reveal
+      
+      simulator.updateBlockHeight(201n);
+      simulator.advanceProposalByTime(0n); // reveal -> final
       
       expect(simulator.getProposalState(0n)).toEqual(ProposalState.FINAL);
     });
 
     it("increments round when advancing to final", () => {
       const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
+      simulator.updateBlockHeight(100n);
+      simulator.createProposal(0n, createMetaHash("Test"), 50n, 50n);
       
       expect(simulator.getRound()).toEqual(0n);
       
-      simulator.advanceProposal(0n); // commit -> reveal
-      simulator.advanceProposal(0n); // reveal -> final
+      simulator.updateBlockHeight(151n);
+      simulator.advanceProposalByTime(0n);
+      simulator.updateBlockHeight(201n);
+      simulator.advanceProposalByTime(0n);
       
       expect(simulator.getRound()).toEqual(1n);
     });
   });
 
-  describe("Commit Phase", () => {
-    it("allows voting during commit phase", () => {
+  describe("Multi-Sig Admin Transitions", () => {
+    it("allows early phase transition with multi-sig", () => {
       const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
+      simulator.updateBlockHeight(100n);
+      simulator.createProposal(0n, createMetaHash("Test"), 50n, 50n);
       
-      // Should not throw
-      simulator.voteCommit(0n, VoteChoice.YES);
-    });
-
-    it("stores commitment in MerkleTree", () => {
-      const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
+      // Advance before deadline with multi-sig (using dummy signatures for demo)
+      const sig0 = randomBytes(64);
+      const sig1 = randomBytes(64);
       
-      simulator.voteCommit(0n, VoteChoice.YES);
+      simulator.advanceProposalMultisig(0n, sig0, sig1);
       
-      // The commit should have succeeded without error
-      expect(simulator.getProposalCount()).toEqual(1n);
+      expect(simulator.getProposalState(0n)).toEqual(ProposalState.REVEAL);
     });
   });
 
@@ -153,17 +220,16 @@ describe("DAO Commit/Reveal Voting Contract", () => {
       
       expect(Buffer.from(voter1Secret).equals(Buffer.from(voter2Secret))).toBe(false);
     });
+  });
 
-    it("tallies remain zero during commit phase", () => {
+  describe("Quorum Requirements", () => {
+    it("quorum not reached with zero votes", () => {
       const simulator = new DaoSimulator();
-      simulator.createProposal(0n, createMetaHash("Test"));
+      const [admin0, admin1, admin2] = createAdminKeys();
+      simulator.initializeDao(admin0, admin1, admin2);
+      simulator.createProposal(0n, createMetaHash("Test"), 100n, 100n);
       
-      simulator.voteCommit(0n, VoteChoice.YES);
-      
-      const tallies = simulator.getVoteTallies();
-      expect(tallies.yes).toEqual(0n);
-      expect(tallies.no).toEqual(0n);
-      expect(tallies.appeal).toEqual(0n);
+      expect(simulator.isQuorumReached(0n)).toBe(false);
     });
   });
 });

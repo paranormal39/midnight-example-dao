@@ -31,7 +31,8 @@ import {
   VoteChoice,
   createDaoPrivateState,
   withVoteChoice,
-  withCommitmentPath
+  withCommitmentPath,
+  withVoterAuthPath
 } from "../dao-witnesses.js";
 import { randomBytes } from "crypto";
 
@@ -47,13 +48,10 @@ export class DaoSimulator {
   readonly contract: Contract<DaoPrivateState>;
   circuitContext: CircuitContext<DaoPrivateState>;
   private secretKey: Uint8Array;
-  
-  // Track commitments for building MerkleTree paths
-  private commitmentsList: Uint8Array[] = [];
 
   constructor(secretKey?: Uint8Array) {
     this.secretKey = secretKey ?? randomBytes(32);
-    this.contract = new Contract<DaoPrivateState>(daoWitnesses);
+    this.contract = new Contract<DaoPrivateState>(daoWitnesses as any);
     const initialPrivateState = createDaoPrivateState(this.secretKey);
     
     const {
@@ -83,23 +81,60 @@ export class DaoSimulator {
     return this.secretKey;
   }
 
-  // Create a new proposal (starts in commit phase)
-  public createProposal(proposalId: bigint, metaHash: Uint8Array): Ledger {
-    this.circuitContext = this.contract.impureCircuits.create_proposal(
+  // Initialize the DAO with admin keys
+  public initializeDao(admin0: Uint8Array, admin1: Uint8Array, admin2: Uint8Array): Ledger {
+    this.circuitContext = this.contract.impureCircuits.initialize_dao(
       this.circuitContext,
-      proposalId,
-      metaHash
+      admin0,
+      admin1,
+      admin2
     ).context;
     return this.getLedger();
   }
 
-  // Commit phase: voter commits their vote
-  public voteCommit(proposalId: bigint, voteChoice: VoteChoice): Ledger {
-    // Update private state with vote choice
-    const updatedPrivateState = withVoteChoice(
+  // Add an eligible voter
+  public addEligibleVoter(voterPubKey: Uint8Array): Ledger {
+    this.circuitContext = this.contract.impureCircuits.add_eligible_voter(
+      this.circuitContext,
+      voterPubKey
+    ).context;
+    return this.getLedger();
+  }
+
+  // Update block height
+  public updateBlockHeight(newHeight: bigint): Ledger {
+    this.circuitContext = this.contract.impureCircuits.update_block_height(
+      this.circuitContext,
+      newHeight
+    ).context;
+    return this.getLedger();
+  }
+
+  // Create a new proposal with time-locked phases
+  public createProposal(
+    proposalId: bigint, 
+    metaHash: Uint8Array,
+    commitDuration: bigint,
+    revealDuration: bigint
+  ): Ledger {
+    this.circuitContext = this.contract.impureCircuits.create_proposal(
+      this.circuitContext,
+      proposalId,
+      metaHash,
+      commitDuration,
+      revealDuration
+    ).context;
+    return this.getLedger();
+  }
+
+  // Commit phase: voter commits their vote (requires voter auth path)
+  public voteCommit(proposalId: bigint, voteChoice: VoteChoice, voterAuthPath: MerkleTreePath): Ledger {
+    // Update private state with vote choice and voter auth path
+    let updatedPrivateState = withVoteChoice(
       this.circuitContext.currentPrivateState,
       voteChoice
     );
+    updatedPrivateState = withVoterAuthPath(updatedPrivateState, voterAuthPath);
     this.circuitContext = {
       ...this.circuitContext,
       currentPrivateState: updatedPrivateState
@@ -140,11 +175,22 @@ export class DaoSimulator {
     return this.getLedger();
   }
 
-  // Advance proposal state: commit -> reveal -> final
-  public advanceProposal(proposalId: bigint): Ledger {
-    this.circuitContext = this.contract.impureCircuits.advance_proposal(
+  // Advance proposal state by time (after deadline)
+  public advanceProposalByTime(proposalId: bigint): Ledger {
+    this.circuitContext = this.contract.impureCircuits.advance_proposal_by_time(
       this.circuitContext,
       proposalId
+    ).context;
+    return this.getLedger();
+  }
+
+  // Advance proposal state with multi-sig
+  public advanceProposalMultisig(proposalId: bigint, sig0: Uint8Array, sig1: Uint8Array): Ledger {
+    this.circuitContext = this.contract.impureCircuits.advance_proposal_multisig(
+      this.circuitContext,
+      proposalId,
+      sig0,
+      sig1
     ).context;
     return this.getLedger();
   }
@@ -157,14 +203,37 @@ export class DaoSimulator {
     return state as ProposalState;
   }
 
-  // Get vote tallies
-  public getVoteTallies(): { yes: bigint; no: bigint; appeal: bigint } {
+  // Get per-proposal vote tallies
+  public getProposalVoteTallies(proposalId: bigint): { yes: bigint; no: bigint; appeal: bigint; total: bigint } {
     const ledgerState = this.getLedger();
     return {
-      yes: ledgerState.votesYes,
-      no: ledgerState.votesNo,
-      appeal: ledgerState.votesAppeal,
+      yes: ledgerState.proposalVotesYes.member(proposalId) ? ledgerState.proposalVotesYes.lookup(proposalId) : 0n,
+      no: ledgerState.proposalVotesNo.member(proposalId) ? ledgerState.proposalVotesNo.lookup(proposalId) : 0n,
+      appeal: ledgerState.proposalVotesAppeal.member(proposalId) ? ledgerState.proposalVotesAppeal.lookup(proposalId) : 0n,
+      total: ledgerState.proposalTotalVotes.member(proposalId) ? ledgerState.proposalTotalVotes.lookup(proposalId) : 0n,
     };
+  }
+
+  // Check if quorum reached for a proposal
+  public isQuorumReached(proposalId: bigint): boolean {
+    const ledgerState = this.getLedger();
+    if (!ledgerState.proposalQuorumReached.member(proposalId)) return false;
+    return ledgerState.proposalQuorumReached.lookup(proposalId);
+  }
+
+  // Get proposal deadlines
+  public getProposalDeadlines(proposalId: bigint): { commitDeadline: bigint; revealDeadline: bigint } {
+    const ledgerState = this.getLedger();
+    return {
+      commitDeadline: ledgerState.commitDeadline.member(proposalId) ? ledgerState.commitDeadline.lookup(proposalId) : 0n,
+      revealDeadline: ledgerState.revealDeadline.member(proposalId) ? ledgerState.revealDeadline.lookup(proposalId) : 0n,
+    };
+  }
+
+  // Get current block height
+  public getCurrentBlockHeight(): bigint {
+    const ledgerState = this.getLedger();
+    return ledgerState.currentBlockHeight.member(0n) ? ledgerState.currentBlockHeight.lookup(0n) : 0n;
   }
 
   // Check if a commit nullifier has been used
@@ -189,5 +258,31 @@ export class DaoSimulator {
   public getProposalCount(): bigint {
     const ledgerState = this.getLedger();
     return ledgerState.proposalCount;
+  }
+
+  // Get voter auth path from eligible voters tree
+  public getVoterAuthPath(voterPubKey: Uint8Array): MerkleTreePath | undefined {
+    const ledgerState = this.getLedger();
+    const runtimePath = ledgerState.eligibleVoters.findPathForLeaf(voterPubKey) as any;
+    if (!runtimePath) return undefined;
+    // Convert runtime path format to our witness format
+    return {
+      leaf: runtimePath.leaf,
+      siblings: runtimePath.path.map((entry: any) => entry.sibling),
+      indices: runtimePath.path.map((entry: any) => entry.dir === 1),
+    };
+  }
+
+  // Get commitment path from vote commitments tree
+  public getCommitmentPath(commitment: Uint8Array): MerkleTreePath | undefined {
+    const ledgerState = this.getLedger();
+    const runtimePath = ledgerState.voteCommitments.findPathForLeaf(commitment) as any;
+    if (!runtimePath) return undefined;
+    // Convert runtime path format to our witness format
+    return {
+      leaf: runtimePath.leaf,
+      siblings: runtimePath.path.map((entry: any) => entry.sibling),
+      indices: runtimePath.path.map((entry: any) => entry.dir === 1),
+    };
   }
 }

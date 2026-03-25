@@ -34,6 +34,9 @@ export type DaoPrivateState = {
   // Voter's secret key - used to derive nullifiers and commitments
   readonly secretKey: Uint8Array;
   
+  // Voter's public key (derived from secret key)
+  readonly voterPubKey: Uint8Array;
+  
   // Current vote choice being cast
   readonly voteChoice: VoteChoice;
   
@@ -42,6 +45,9 @@ export type DaoPrivateState = {
   
   // MerkleTree paths for commitments (commitment hex -> path)
   readonly commitmentPaths: Map<string, MerkleTreePath>;
+  
+  // MerkleTree path for voter authorization
+  readonly voterAuthPath: MerkleTreePath | null;
 };
 
 // Witness function type definitions matching the contract
@@ -52,6 +58,10 @@ export type DaoWitnesses = {
     context: WitnessContext<DaoPrivateState>,
     proposalId: bigint,
     commitment: Uint8Array
+  ) => [DaoPrivateState, MerkleTreePath];
+  get_voter_auth_path: (
+    context: WitnessContext<DaoPrivateState>,
+    voterPubKey: Uint8Array
   ) => [DaoPrivateState, MerkleTreePath];
 };
 
@@ -82,18 +92,31 @@ export const daoWitnesses: DaoWitnesses = {
     
     return [privateState, path];
   },
+
+  // Returns the MerkleTree path for voter authorization
+  get_voter_auth_path: (
+    { privateState },
+    _voterPubKey: Uint8Array
+  ): [DaoPrivateState, MerkleTreePath] => {
+    if (!privateState.voterAuthPath) {
+      throw new Error('Voter authorization path not set - voter may not be registered');
+    }
+    return [privateState, privateState.voterAuthPath];
+  },
 };
 
 // Helper function to create initial private state
-export function createDaoPrivateState(secretKey: Uint8Array): DaoPrivateState {
+export function createDaoPrivateState(secretKey: Uint8Array, voterPubKey?: Uint8Array): DaoPrivateState {
   if (secretKey.length !== 32) {
     throw new Error("Secret key must be 32 bytes");
   }
   return {
     secretKey,
+    voterPubKey: voterPubKey || new Uint8Array(32),
     voteChoice: VoteChoice.YES,
     commitments: new Map(),
     commitmentPaths: new Map(),
+    voterAuthPath: null,
   };
 }
 
@@ -134,5 +157,27 @@ export function withCommitmentPath(
   return {
     ...state,
     commitmentPaths: newPaths,
+  };
+}
+
+// Helper function to set voter authorization path
+export function withVoterAuthPath(
+  state: DaoPrivateState,
+  path: MerkleTreePath
+): DaoPrivateState {
+  return {
+    ...state,
+    voterAuthPath: path,
+  };
+}
+
+// Helper function to set voter public key
+export function withVoterPubKey(
+  state: DaoPrivateState,
+  pubKey: Uint8Array
+): DaoPrivateState {
+  return {
+    ...state,
+    voterPubKey: pubKey,
   };
 }

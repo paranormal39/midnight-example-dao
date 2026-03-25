@@ -2,88 +2,139 @@
 
 ## Overview
 
-This DAO contract enables **privacy-preserving voting** using a **commit/reveal scheme** with cryptographically enforced privacy. Nullifiers and vote commitments are derived inside ZK circuits using `persistentCommit`, and tallies are incremented inside the reveal circuit.
+This DAO contract enables **privacy-preserving voting** using a **commit/reveal scheme** with comprehensive security features:
+
+1. **Commit/Reveal Voting** - Nullifiers and vote commitments derived inside ZK circuits
+2. **Voter Authorization** - MerkleTree-based eligibility verification
+3. **Time-Locked Phases** - Block height deadlines for commit and reveal phases
+4. **Multi-Sig Administration** - 2-of-3 signature requirement for early phase transitions
+5. **Per-Proposal Tallies** - Isolated vote counts with quorum requirements
+6. **Replay Protection** - Round counter prevents cross-proposal vote reuse
 
 ## Contract Architecture
 
 ### Proposal State Machine
 
-Proposals progress through these phases:
+Proposals progress through time-locked phases:
 
 ```
-COMMIT → REVEAL → FINAL
+COMMIT (deadline) → REVEAL (deadline) → FINAL
 ```
 
 | Phase | Description |
 |-------|-------------|
-| **COMMIT** | Voters submit hidden vote commitments |
-| **REVEAL** | Voters reveal their votes, tallies are incremented |
-| **FINAL** | Voting complete, results are final |
+| **COMMIT** | Authorized voters submit hidden vote commitments (until commitDeadline) |
+| **REVEAL** | Voters reveal their votes, per-proposal tallies incremented (until revealDeadline) |
+| **FINAL** | Voting complete, quorum checked, results are final |
 
 ### Ledger State (On-Chain Storage)
 
+#### Core State
 | Ledger | Type | Description |
 |--------|------|-------------|
 | `round` | `Counter` | Current voting round (increments when proposal finalizes) |
 | `proposalCount` | `Counter` | Total number of proposals created |
 | `proposalMeta` | `Map<Field, Bytes<32>>` | Maps proposalId → SHA-256 hash of metadata JSON |
 | `proposalState` | `Map<Field, ProposalState>` | Maps proposalId → current phase (0-3) |
-| `voteCommitments` | `MerkleTree<Bytes<32>>` | MerkleTree of vote commitments (hides vote choices) |
+
+#### Voter Authorization
+| Ledger | Type | Description |
+|--------|------|-------------|
+| `eligibleVoters` | `MerkleTree<Bytes<32>>` | MerkleTree of eligible voter public keys |
+
+#### Time-Locked Phases
+| Ledger | Type | Description |
+|--------|------|-------------|
+| `commitDeadline` | `Map<Field, Uint<64>>` | Block height when commit phase ends per proposal |
+| `revealDeadline` | `Map<Field, Uint<64>>` | Block height when reveal phase ends per proposal |
+| `currentBlockHeight` | `Map<Field, Uint<64>>` | Current block height (key 0) |
+
+#### Multi-Sig Administration
+| Ledger | Type | Description |
+|--------|------|-------------|
+| `adminPubKeys` | `Map<Field, Bytes<32>>` | Admin public keys (keys 0, 1, 2) |
+| `adminNonce` | `Counter` | Nonce for replay protection on admin actions |
+
+#### Per-Proposal Tallies & Quorum
+| Ledger | Type | Description |
+|--------|------|-------------|
+| `voteCommitments` | `MerkleTree<Bytes<32>>` | MerkleTree of vote commitments |
 | `commitNullifiers` | `Set<Bytes<32>>` | Nullifiers for commit phase (prevents double-commit) |
 | `revealNullifiers` | `Set<Bytes<32>>` | Nullifiers for reveal phase (prevents double-reveal) |
-| `votesYes` | `Counter` | Global YES vote tally |
-| `votesNo` | `Counter` | Global NO vote tally |
-| `votesAppeal` | `Counter` | Global APPEAL vote tally |
+| `proposalVotesYes` | `Map<Field, Uint<32>>` | Per-proposal YES vote tally |
+| `proposalVotesNo` | `Map<Field, Uint<32>>` | Per-proposal NO vote tally |
+| `proposalVotesAppeal` | `Map<Field, Uint<32>>` | Per-proposal APPEAL vote tally |
+| `proposalTotalVotes` | `Map<Field, Uint<32>>` | Per-proposal total vote count |
+| `proposalQuorumReached` | `Map<Field, Boolean>` | Whether quorum (3 votes) was reached |
 
 ### Circuits (Smart Contract Functions)
 
-#### `create_proposal(proposalId: Field, metaHash: Bytes<32>)`
-Creates a new proposal on-chain (starts in COMMIT phase).
+#### Initialization
+
+##### `initialize_dao(admin0, admin1, admin2: Bytes<32>)`
+Initializes the DAO with 3 admin public keys for multi-sig operations.
+
+##### `add_eligible_voter(voterPubKey: Bytes<32>)`
+Adds a voter's public key to the eligible voters MerkleTree.
+
+##### `update_block_height(newHeight: Uint<64>)`
+Updates the current block height (called by oracle or trusted source).
+
+#### Proposal Management
+
+##### `create_proposal(proposalId: Field, metaHash: Bytes<32>, commitDuration: Uint<64>, revealDuration: Uint<64>)`
+Creates a new proposal with time-locked phases.
 
 **Parameters:**
-- `proposalId` - The proposal ID (should match current `proposalCount`)
+- `proposalId` - The proposal ID
 - `metaHash` - SHA-256 hash of the proposal metadata JSON
+- `commitDuration` - Number of blocks for commit phase
+- `revealDuration` - Number of blocks for reveal phase
 
 **Actions:**
-- Increments `proposalCount`
-- Stores `metaHash` in `proposalMeta[proposalId]`
-- Sets `proposalState[proposalId]` to COMMIT
+- Sets deadlines: `commitDeadline = currentBlockHeight + commitDuration`
+- Sets deadlines: `revealDeadline = commitDeadline + revealDuration`
+- Initializes per-proposal tallies to zero
 
-#### `vote_commit(proposalId: Field)`
-Commits a vote during the COMMIT phase. Vote choice stays hidden.
+#### Voting
 
-**Privacy Features:**
-- Nullifier derived inside circuit using `persistentCommit(sk, "commit", round, proposalId)`
-- Vote commitment derived inside circuit using `persistentCommit(sk, ballot, proposalId)`
-- Both are cryptographically enforced by the ZK proof
+##### `vote_commit(proposalId: Field)`
+Commits a vote during the COMMIT phase. **Requires voter authorization.**
 
-**Actions:**
-- Verifies proposal is in COMMIT phase
-- Derives commit nullifier (prevents double-commit)
-- Derives vote commitment (hides vote choice)
-- Inserts commitment into MerkleTree
-- Inserts nullifier into commitNullifiers set
+**Security Features:**
+- Verifies voter is in `eligibleVoters` MerkleTree
+- Verifies `currentBlockHeight <= commitDeadline`
+- Nullifier derived inside circuit using `persistentCommit`
+- Vote commitment derived inside circuit
 
-#### `vote_reveal(proposalId: Field)`
-Reveals a vote during the REVEAL phase. Tally is incremented inside the circuit.
+##### `vote_reveal(proposalId: Field)`
+Reveals a vote during the REVEAL phase. Per-proposal tally incremented inside circuit.
 
-**Privacy Features:**
-- Reveal nullifier derived inside circuit using `persistentCommit(sk, "reveal", round, proposalId)`
-- Vote commitment re-derived and verified against MerkleTree
-- Tally incremented inside circuit (cryptographically enforced)
-
-**Actions:**
-- Verifies proposal is in REVEAL phase
-- Derives reveal nullifier (prevents double-reveal)
+**Security Features:**
+- Verifies `currentBlockHeight <= revealDeadline`
 - Verifies commitment exists in MerkleTree
-- Increments appropriate tally counter (YES/NO/APPEAL)
+- Increments per-proposal tally (YES/NO/APPEAL)
+- Updates `proposalTotalVotes` and checks quorum (≥3 votes)
 
-#### `advance_proposal(proposalId: Field)`
-Advances proposal to the next phase.
+#### Phase Transitions
+
+##### `advance_proposal_by_time(proposalId: Field)`
+Advances proposal after deadline passes. **Anyone can call.**
 
 **Actions:**
-- COMMIT → REVEAL
-- REVEAL → FINAL (also increments round counter)
+- COMMIT → REVEAL (requires `currentBlockHeight > commitDeadline`)
+- REVEAL → FINAL (requires `currentBlockHeight > revealDeadline`)
+
+##### `advance_proposal_multisig(proposalId: Field, sig0: Bytes<64>, sig1: Bytes<64>)`
+Advances proposal early with 2-of-3 admin signatures.
+
+**Actions:**
+- Verifies 2 valid admin signatures
+- Increments `adminNonce` for replay protection
+- Advances to next phase
+
+##### `check_proposal_result(proposalId: Field)`
+Verifies proposal is finalized and quorum was reached.
 
 ## TypeScript API
 

@@ -305,19 +305,19 @@ const deployOrJoin = async (
   }
 };
 
-const displayResults = async (providers: DaoProviders, contract: DeployedDaoContract): Promise<void> => {
-  const votes = await daoApi.displayVoteResults(providers, contract);
+const displayResults = async (providers: DaoProviders, contract: DeployedDaoContract, proposalId: bigint): Promise<void> => {
+  const votes = await daoApi.displayVoteResults(providers, contract, proposalId);
   if (votes) {
-    const total = Number(votes.yes) + Number(votes.no) + Number(votes.appeal);
     console.log(`
 ${DIVIDER}
-  Vote Results (Global Tallies)
+  Vote Results for Proposal ${proposalId}
 ${DIVIDER}
   YES:    ${votes.yes}
   NO:     ${votes.no}
   APPEAL: ${votes.appeal}
   ────────────────────
-  Total Votes: ${total}
+  Total Votes: ${votes.total}
+  Quorum Reached: ${votes.quorumReached ? 'YES' : 'NO'}
 ${DIVIDER}
 `);
   }
@@ -381,9 +381,9 @@ const votingLoop = async (
           console.log(`  ✗ Reveal failed: ${msg}\n`);
         }
         break;
-      case '5': // Advance proposal phase
+      case '5': // Advance proposal phase (by time - after deadline)
         try {
-          await api.withStatus('Advancing proposal phase', () => daoApi.advanceProposal(contract, proposalId));
+          await api.withStatus('Advancing proposal phase', () => daoApi.advanceProposalByTime(contract, proposalId));
           console.log('  ✓ Proposal advanced to next phase!\n');
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -391,7 +391,7 @@ const votingLoop = async (
         }
         break;
       case '6': // View results
-        await displayResults(providers, contract);
+        await displayResults(providers, contract, proposalId);
         break;
       case '7': // Back
         return true;
