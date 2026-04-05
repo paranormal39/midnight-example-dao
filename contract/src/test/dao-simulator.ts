@@ -22,7 +22,8 @@ import {
 import {
   Contract,
   type Ledger,
-  ledger
+  ledger,
+  pureCircuits
 } from "../managed/dao/contract/index.js";
 import { 
   type DaoPrivateState, 
@@ -48,6 +49,11 @@ export class DaoSimulator {
   readonly contract: Contract<DaoPrivateState>;
   circuitContext: CircuitContext<DaoPrivateState>;
   private secretKey: Uint8Array;
+
+  // Derive public key from secret using the contract's exported pure circuit
+  static derivePublicKey(secret: Uint8Array): Uint8Array {
+    return pureCircuits.derive_voter_pubkey(secret);
+  }
 
   constructor(secretKey?: Uint8Array) {
     this.secretKey = secretKey ?? randomBytes(32);
@@ -92,20 +98,22 @@ export class DaoSimulator {
     return this.getLedger();
   }
 
-  // Add an eligible voter
-  public addEligibleVoter(voterPubKey: Uint8Array): Ledger {
+  // Add an eligible voter (requires admin secret for access control)
+  public addEligibleVoter(voterPubKey: Uint8Array, adminSecret: Uint8Array): Ledger {
     this.circuitContext = this.contract.impureCircuits.add_eligible_voter(
       this.circuitContext,
-      voterPubKey
+      voterPubKey,
+      adminSecret
     ).context;
     return this.getLedger();
   }
 
-  // Update block height
-  public updateBlockHeight(newHeight: bigint): Ledger {
+  // Update block height (requires admin secret for access control)
+  public updateBlockHeight(newHeight: bigint, adminSecret: Uint8Array): Ledger {
     this.circuitContext = this.contract.impureCircuits.update_block_height(
       this.circuitContext,
-      newHeight
+      newHeight,
+      adminSecret
     ).context;
     return this.getLedger();
   }
@@ -184,13 +192,13 @@ export class DaoSimulator {
     return this.getLedger();
   }
 
-  // Advance proposal state with multi-sig
-  public advanceProposalMultisig(proposalId: bigint, sig0: Uint8Array, sig1: Uint8Array): Ledger {
+  // Advance proposal state with multi-sig (requires 2 different admin secrets)
+  public advanceProposalMultisig(proposalId: bigint, adminSecret0: Uint8Array, adminSecret1: Uint8Array): Ledger {
     this.circuitContext = this.contract.impureCircuits.advance_proposal_multisig(
       this.circuitContext,
       proposalId,
-      sig0,
-      sig1
+      adminSecret0,
+      adminSecret1
     ).context;
     return this.getLedger();
   }

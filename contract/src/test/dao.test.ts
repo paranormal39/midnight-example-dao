@@ -26,9 +26,14 @@ function createMetaHash(title: string): Uint8Array {
   return createHash('sha256').update(JSON.stringify({ title })).digest();
 }
 
-// Helper to create admin keys
-function createAdminKeys(): [Uint8Array, Uint8Array, Uint8Array] {
+// Helper to create admin secrets (private keys)
+function createAdminSecrets(): [Uint8Array, Uint8Array, Uint8Array] {
   return [randomBytes(32), randomBytes(32), randomBytes(32)];
+}
+
+// Helper to derive public key from secret using the contract's pure circuit
+function deriveAdminPubKey(secret: Uint8Array): Uint8Array {
+  return DaoSimulator.derivePublicKey(secret);
 }
 
 describe("DAO Full Security Contract", () => {
@@ -56,7 +61,10 @@ describe("DAO Full Security Contract", () => {
 
     it("initializes DAO with admin keys", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       
       simulator.initializeDao(admin0, admin1, admin2);
       
@@ -66,11 +74,17 @@ describe("DAO Full Security Contract", () => {
   });
 
   describe("Voter Registration", () => {
-    it("adds eligible voter to MerkleTree", () => {
+    it("adds eligible voter to MerkleTree with admin auth", () => {
       const simulator = new DaoSimulator();
-      const voterPubKey = randomBytes(32);
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       
-      simulator.addEligibleVoter(voterPubKey);
+      simulator.initializeDao(admin0, admin1, admin2);
+      
+      const voterPubKey = randomBytes(32);
+      simulator.addEligibleVoter(voterPubKey, adminSecret0);
       
       // Voter should be in the tree
       const path = simulator.getVoterAuthPath(voterPubKey);
@@ -79,33 +93,42 @@ describe("DAO Full Security Contract", () => {
   });
 
   describe("Block Height Management", () => {
-    it("updates block height", () => {
+    it("updates block height with admin auth", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
       
-      simulator.updateBlockHeight(100n);
+      simulator.updateBlockHeight(100n, adminSecret0);
       
       expect(simulator.getCurrentBlockHeight()).toEqual(100n);
     });
 
     it("prevents block height from decreasing", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
       
-      simulator.updateBlockHeight(100n);
+      simulator.updateBlockHeight(100n, adminSecret0);
       
-      expect(() => simulator.updateBlockHeight(50n)).toThrow();
+      expect(() => simulator.updateBlockHeight(50n, adminSecret0)).toThrow();
     });
   });
 
   describe("Proposal Creation with Time-Locks", () => {
     it("creates a proposal with deadlines", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
-      simulator.updateBlockHeight(100n);
+      simulator.updateBlockHeight(100n, adminSecret0);
       
       const metaHash = createMetaHash("Test Proposal");
       simulator.createProposal(0n, metaHash, 50n, 50n); // 50 blocks commit, 50 blocks reveal
@@ -119,7 +142,10 @@ describe("DAO Full Security Contract", () => {
 
     it("initializes proposal in commit state", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
       
       const metaHash = createMetaHash("Test Proposal");
@@ -130,7 +156,10 @@ describe("DAO Full Security Contract", () => {
 
     it("initializes per-proposal vote tallies to zero", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
       simulator.createProposal(0n, createMetaHash("Test"), 100n, 100n);
       
@@ -146,15 +175,18 @@ describe("DAO Full Security Contract", () => {
   describe("Time-Based State Transitions", () => {
     it("advances from commit to reveal after deadline", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
-      simulator.updateBlockHeight(100n);
+      simulator.updateBlockHeight(100n, adminSecret0);
       simulator.createProposal(0n, createMetaHash("Test"), 50n, 50n);
       
       expect(simulator.getProposalState(0n)).toEqual(ProposalState.COMMIT);
       
       // Advance time past commit deadline
-      simulator.updateBlockHeight(151n);
+      simulator.updateBlockHeight(151n, adminSecret0);
       simulator.advanceProposalByTime(0n);
       
       expect(simulator.getProposalState(0n)).toEqual(ProposalState.REVEAL);
@@ -162,16 +194,19 @@ describe("DAO Full Security Contract", () => {
 
     it("advances from reveal to final after deadline", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
-      simulator.updateBlockHeight(100n);
+      simulator.updateBlockHeight(100n, adminSecret0);
       simulator.createProposal(0n, createMetaHash("Test"), 50n, 50n);
       
       // Advance through both phases
-      simulator.updateBlockHeight(151n);
+      simulator.updateBlockHeight(151n, adminSecret0);
       simulator.advanceProposalByTime(0n); // commit -> reveal
       
-      simulator.updateBlockHeight(201n);
+      simulator.updateBlockHeight(201n, adminSecret0);
       simulator.advanceProposalByTime(0n); // reveal -> final
       
       expect(simulator.getProposalState(0n)).toEqual(ProposalState.FINAL);
@@ -179,16 +214,19 @@ describe("DAO Full Security Contract", () => {
 
     it("increments round when advancing to final", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
-      simulator.updateBlockHeight(100n);
+      simulator.updateBlockHeight(100n, adminSecret0);
       simulator.createProposal(0n, createMetaHash("Test"), 50n, 50n);
       
       expect(simulator.getRound()).toEqual(0n);
       
-      simulator.updateBlockHeight(151n);
+      simulator.updateBlockHeight(151n, adminSecret0);
       simulator.advanceProposalByTime(0n);
-      simulator.updateBlockHeight(201n);
+      simulator.updateBlockHeight(201n, adminSecret0);
       simulator.advanceProposalByTime(0n);
       
       expect(simulator.getRound()).toEqual(1n);
@@ -196,18 +234,18 @@ describe("DAO Full Security Contract", () => {
   });
 
   describe("Multi-Sig Admin Transitions", () => {
-    it("allows early phase transition with multi-sig", () => {
+    it("allows early phase transition with 2-of-3 admin secrets", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
-      simulator.updateBlockHeight(100n);
+      simulator.updateBlockHeight(100n, adminSecret0);
       simulator.createProposal(0n, createMetaHash("Test"), 50n, 50n);
       
-      // Advance before deadline with multi-sig (using dummy signatures for demo)
-      const sig0 = randomBytes(64);
-      const sig1 = randomBytes(64);
-      
-      simulator.advanceProposalMultisig(0n, sig0, sig1);
+      // Advance before deadline with 2 different admin secrets
+      simulator.advanceProposalMultisig(0n, adminSecret0, adminSecret1);
       
       expect(simulator.getProposalState(0n)).toEqual(ProposalState.REVEAL);
     });
@@ -225,7 +263,10 @@ describe("DAO Full Security Contract", () => {
   describe("Quorum Requirements", () => {
     it("quorum not reached with zero votes", () => {
       const simulator = new DaoSimulator();
-      const [admin0, admin1, admin2] = createAdminKeys();
+      const [adminSecret0, adminSecret1, adminSecret2] = createAdminSecrets();
+      const admin0 = deriveAdminPubKey(adminSecret0);
+      const admin1 = deriveAdminPubKey(adminSecret1);
+      const admin2 = deriveAdminPubKey(adminSecret2);
       simulator.initializeDao(admin0, admin1, admin2);
       simulator.createProposal(0n, createMetaHash("Test"), 100n, 100n);
       

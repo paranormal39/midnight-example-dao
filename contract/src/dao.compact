@@ -41,8 +41,7 @@ witness get_commitment_path(proposalId: Field, cm: Bytes<32>): MerkleTreePath<10
 // Get the MerkleTree path proving voter is in eligible voters tree
 witness get_voter_auth_path(voterPubKey: Bytes<32>): MerkleTreePath<10, Bytes<32>>;
 
-// Get admin signature for multi-sig operations
-witness get_admin_signature(adminIndex: Uint<8>, messageHash: Bytes<32>): Bytes<64>;
+// NOTE: get_admin_signature witness removed - signatures passed as circuit parameters instead
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LEDGER STATE - Public on-chain state
@@ -91,6 +90,9 @@ export ledger adminPubKeys: Map<Field, Bytes<32>>;
 
 // Nonce for replay protection on admin actions
 export ledger adminNonce: Counter;
+
+// Initialization flag (prevents re-initialization)
+export ledger daoInitialized: Map<Field, Boolean>;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PER-PROPOSAL TALLIES & QUORUM
@@ -141,7 +143,8 @@ struct AdminActionPreimage {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Derive voter public key from secret key
-circuit derive_voter_pubkey(sk: Bytes<32>): Bytes<32> {
+// Exported as pure circuit so tests can use it
+export pure circuit derive_voter_pubkey(sk: Bytes<32>): Bytes<32> {
   return persistentCommit<Bytes<8>>(pad(8, "dao:pk"), sk);
 }
 
@@ -194,24 +197,59 @@ circuit verify_voter_eligibility(sk: Bytes<32>): [] {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Initialize the DAO with admin keys
+// NOTE: Can only be called once. First caller sets admin keys.
+// In production, this should be called during contract deployment.
 export circuit initialize_dao(
   admin0: Bytes<32>,
   admin1: Bytes<32>,
   admin2: Bytes<32>
 ): [] {
+  // Prevent re-initialization
+  assert(!daoInitialized.member(0 as Field) || !daoInitialized.lookup(0 as Field), "DAO already initialized");
+  
   adminPubKeys.insert(0 as Field, disclose(admin0));
   adminPubKeys.insert(1 as Field, disclose(admin1));
   adminPubKeys.insert(2 as Field, disclose(admin2));
   currentBlockHeight.insert(0 as Field, 0);
+  daoInitialized.insert(0 as Field, true);
 }
 
-// Add an eligible voter (admin only - simplified for demo)
-export circuit add_eligible_voter(voterPubKey: Bytes<32>): [] {
+// Add an eligible voter
+// ACCESS CONTROL: Requires caller to prove knowledge of an admin secret key
+// The caller must provide a valid admin secret that derives to a stored admin pubkey
+export circuit add_eligible_voter(voterPubKey: Bytes<32>, adminSecret: Bytes<32>): [] {
+  // Verify caller is an admin by checking their derived pubkey matches a stored admin
+  const callerPubKey = derive_voter_pubkey(adminSecret);
+  const admin0 = adminPubKeys.lookup(0 as Field);
+  const admin1 = adminPubKeys.lookup(1 as Field);
+  const admin2 = adminPubKeys.lookup(2 as Field);
+  
+  assert(
+    disclose(callerPubKey) == admin0 ||
+    disclose(callerPubKey) == admin1 ||
+    disclose(callerPubKey) == admin2,
+    "Caller is not an admin"
+  );
+  
   eligibleVoters.insert(disclose(voterPubKey));
 }
 
-// Update block height (called by oracle or trusted source)
-export circuit update_block_height(newHeight: Uint<64>): [] {
+// Update block height
+// ACCESS CONTROL: Requires caller to prove knowledge of an admin secret key
+export circuit update_block_height(newHeight: Uint<64>, adminSecret: Bytes<32>): [] {
+  // Verify caller is an admin
+  const callerPubKey = derive_voter_pubkey(adminSecret);
+  const admin0 = adminPubKeys.lookup(0 as Field);
+  const admin1 = adminPubKeys.lookup(1 as Field);
+  const admin2 = adminPubKeys.lookup(2 as Field);
+  
+  assert(
+    disclose(callerPubKey) == admin0 ||
+    disclose(callerPubKey) == admin1 ||
+    disclose(callerPubKey) == admin2,
+    "Caller is not an admin"
+  );
+  
   const height = disclose(newHeight);
   assert(height >= currentBlockHeight.lookup(0 as Field), "Height cannot decrease");
   currentBlockHeight.insert(0 as Field, height);
@@ -361,32 +399,42 @@ export circuit advance_proposal_by_time(proposalId: Field): [] {
   }
 }
 
-// Multi-sig admin advance (2-of-3 signatures required)
+// Multi-sig admin advance (2-of-3 admin secrets required)
 // Allows early phase transition before deadline
+// ACCESS CONTROL: Requires 2 different admin secrets that derive to stored admin pubkeys
 export circuit advance_proposal_multisig(
   proposalId: Field,
-  sig0: Bytes<64>,
-  sig1: Bytes<64>
+  adminSecret0: Bytes<32>,
+  adminSecret1: Bytes<32>
 ): [] {
   const pid = disclose(proposalId);
   const currentState = proposalState.lookup(pid);
-  const nonce = adminNonce.read();
   
-  // Create message hash for signature verification
-  const actionPreimage = AdminActionPreimage {
-    action: pad(8, "advance"),
-    proposalId: proposalId,
-    nonce: nonce
-  };
+  // Derive public keys from provided secrets
+  const callerPubKey0 = derive_voter_pubkey(adminSecret0);
+  const callerPubKey1 = derive_voter_pubkey(adminSecret1);
   
-  // Verify at least 2 valid signatures (simplified - in production use proper sig verification)
-  // Note: Real implementation would use ed25519_verify or similar
-  const sig0Hash = persistentCommit<AdminActionPreimage>(actionPreimage, adminPubKeys.lookup(0 as Field));
-  const sig1Hash = persistentCommit<AdminActionPreimage>(actionPreimage, adminPubKeys.lookup(1 as Field));
+  // Get stored admin public keys
+  const admin0 = adminPubKeys.lookup(0 as Field);
+  const admin1 = adminPubKeys.lookup(1 as Field);
+  const admin2 = adminPubKeys.lookup(2 as Field);
   
-  // For demo: check signatures are non-zero (real impl would verify cryptographically)
-  assert(disclose(sig0) != pad(64, ""), "Invalid signature 0");
-  assert(disclose(sig1) != pad(64, ""), "Invalid signature 1");
+  // Verify first secret matches an admin
+  const isAdmin0Valid = 
+    disclose(callerPubKey0) == admin0 ||
+    disclose(callerPubKey0) == admin1 ||
+    disclose(callerPubKey0) == admin2;
+  assert(isAdmin0Valid, "First caller is not an admin");
+  
+  // Verify second secret matches a DIFFERENT admin
+  const isAdmin1Valid = 
+    disclose(callerPubKey1) == admin0 ||
+    disclose(callerPubKey1) == admin1 ||
+    disclose(callerPubKey1) == admin2;
+  assert(isAdmin1Valid, "Second caller is not an admin");
+  
+  // Ensure they are different admins (2-of-3 requirement)
+  assert(disclose(callerPubKey0) != disclose(callerPubKey1), "Must be 2 different admins");
   
   // Increment nonce to prevent replay
   adminNonce.increment(1);

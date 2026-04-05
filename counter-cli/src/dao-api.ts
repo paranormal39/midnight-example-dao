@@ -14,7 +14,7 @@
 // limitations under the License.
 
 import { type ContractAddress } from '@midnight-ntwrk/compact-runtime';
-import { Dao, type DaoPrivateState, daoWitnesses, VoteChoice, createDaoPrivateState, withVoteChoice, withCommitmentPath, type MerkleTreePath } from '@midnight-ntwrk/counter-contract';
+import { Dao, type DaoPrivateState, daoWitnesses, VoteChoice, createDaoPrivateState, withVoteChoice, withCommitmentPath, type MerkleTreePath } from '@midnight-ntwrk/dao-contract';
 import { deployContract, findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
 import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
@@ -238,15 +238,15 @@ export const advanceProposalByTime = async (
   return finalizedTxData.public;
 };
 
-// Advance proposal state with multi-sig (before deadline)
+// Advance proposal state with multi-sig (2-of-3 admin secrets required)
 export const advanceProposalMultisig = async (
   daoContract: DeployedDaoContract,
   proposalId: bigint,
-  sig0: Uint8Array,
-  sig1: Uint8Array,
+  adminSecret0: Uint8Array,
+  adminSecret1: Uint8Array,
 ): Promise<FinalizedTxData> => {
-  logger.info(`Advancing proposal ${proposalId} with multi-sig...`);
-  const finalizedTxData = await daoContract.callTx.advance_proposal_multisig(proposalId, sig0, sig1);
+  logger.info(`Advancing proposal ${proposalId} with 2-of-3 admin authorization...`);
+  const finalizedTxData = await daoContract.callTx.advance_proposal_multisig(proposalId, adminSecret0, adminSecret1);
   logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };
@@ -264,24 +264,26 @@ export const initializeDao = async (
   return finalizedTxData.public;
 };
 
-// Add eligible voter
+// Add eligible voter (requires admin secret for access control)
 export const addEligibleVoter = async (
   daoContract: DeployedDaoContract,
   voterPubKey: Uint8Array,
+  adminSecret: Uint8Array,
 ): Promise<FinalizedTxData> => {
   logger.info(`Adding eligible voter...`);
-  const finalizedTxData = await daoContract.callTx.add_eligible_voter(voterPubKey);
+  const finalizedTxData = await daoContract.callTx.add_eligible_voter(voterPubKey, adminSecret);
   logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };
 
-// Update block height
+// Update block height (requires admin secret for access control)
 export const updateBlockHeight = async (
   daoContract: DeployedDaoContract,
   newHeight: bigint,
+  adminSecret: Uint8Array,
 ): Promise<FinalizedTxData> => {
   logger.info(`Updating block height to ${newHeight}...`);
-  const finalizedTxData = await daoContract.callTx.update_block_height(newHeight);
+  const finalizedTxData = await daoContract.callTx.update_block_height(newHeight, adminSecret);
   logger.info(`Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };

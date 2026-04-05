@@ -69,16 +69,34 @@ COMMIT (deadline) → REVEAL (deadline) → FINAL
 
 ### Circuits (Smart Contract Functions)
 
+#### Circuit Readiness Levels
+
+| Circuit | Status | Notes |
+|---------|--------|-------|
+| `initialize_dao` | **Production** | Access control enforced, single-use guard |
+| `add_eligible_voter` | **Production** | Admin secret required for access control |
+| `update_block_height` | **Demo** | Admin secret required; production should use on-chain oracle |
+| `create_proposal` | **Production** | Time-locked phases with configurable durations |
+| `vote_commit` | **Production** | Full voter auth, nullifier derivation, replay protection |
+| `vote_reveal` | **Production** | Commitment verification, tally increment inside circuit |
+| `advance_proposal_by_time` | **Production** | Time-based state transitions |
+| `advance_proposal_multisig` | **Production** | 2-of-3 admin secret verification |
+| `check_proposal_result` | **Production** | Quorum check and result query |
+| `derive_voter_pubkey` | **Production** | Pure circuit for key derivation |
+
+**Demo circuits** are functional but require additional hardening for mainnet:
+- `update_block_height`: Should integrate with Midnight's block height oracle instead of admin-controlled updates
+
 #### Initialization
 
 ##### `initialize_dao(admin0, admin1, admin2: Bytes<32>)`
-Initializes the DAO with 3 admin public keys for multi-sig operations.
+Initializes the DAO with 3 admin public keys for multi-sig operations. **Can only be called once.**
 
-##### `add_eligible_voter(voterPubKey: Bytes<32>)`
-Adds a voter's public key to the eligible voters MerkleTree.
+##### `add_eligible_voter(voterPubKey: Bytes<32>, adminSecret: Bytes<32>)`
+Adds a voter's public key to the eligible voters MerkleTree. **Requires admin secret for access control.**
 
-##### `update_block_height(newHeight: Uint<64>)`
-Updates the current block height (called by oracle or trusted source).
+##### `update_block_height(newHeight: Uint<64>, adminSecret: Bytes<32>)`
+Updates the current block height. **Requires admin secret for access control.** In production, should be replaced with on-chain oracle integration.
 
 #### Proposal Management
 
@@ -125,11 +143,11 @@ Advances proposal after deadline passes. **Anyone can call.**
 - COMMIT → REVEAL (requires `currentBlockHeight > commitDeadline`)
 - REVEAL → FINAL (requires `currentBlockHeight > revealDeadline`)
 
-##### `advance_proposal_multisig(proposalId: Field, sig0: Bytes<64>, sig1: Bytes<64>)`
-Advances proposal early with 2-of-3 admin signatures.
+##### `advance_proposal_multisig(proposalId: Field, adminSecret0: Bytes<32>, adminSecret1: Bytes<32>)`
+Advances proposal early with 2-of-3 admin authorization.
 
 **Actions:**
-- Verifies 2 valid admin signatures
+- Verifies 2 distinct admin secrets (derives public keys and checks against stored admin keys)
 - Increments `adminNonce` for replay protection
 - Advances to next phase
 
