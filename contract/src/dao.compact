@@ -36,10 +36,12 @@ witness get_secret_key(): Bytes<32>;
 witness get_vote_choice(): Uint<8>;
 
 // Get the MerkleTree path for a commitment (used in reveal phase)
-witness get_commitment_path(proposalId: Field, cm: Bytes<32>): MerkleTreePath<10, Bytes<32>>;
+// Returns Maybe to handle case where commitment might not exist
+witness get_commitment_path(cm: Bytes<32>): Maybe<MerkleTreePath<10, Bytes<32>>>;
 
 // Get the MerkleTree path proving voter is in eligible voters tree
-witness get_voter_auth_path(voterPubKey: Bytes<32>): MerkleTreePath<10, Bytes<32>>;
+// Returns Maybe to handle case where voter might not be registered
+witness get_voter_auth_path(voterPubKey: Bytes<32>): Maybe<MerkleTreePath<10, Bytes<32>>>;
 
 // NOTE: get_admin_signature witness removed - signatures passed as circuit parameters instead
 
@@ -64,8 +66,8 @@ export ledger proposalState: Map<Field, ProposalState>;
 // ═══════════════════════════════════════════════════════════════════════════
 
 // MerkleTree of eligible voters (voters prove membership)
-// Using on-chain MerkleTree - voters are added during initialization
-export ledger eligibleVoters: MerkleTree<10, Bytes<32>>;
+// Using HistoricMerkleTree to maintain history for proof generation
+export ledger eligibleVoters: HistoricMerkleTree<10, Bytes<32>>;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TIME-LOCKED PHASES - Block height deadlines
@@ -98,8 +100,9 @@ export ledger daoInitialized: Map<Field, Boolean>;
 // PER-PROPOSAL TALLIES & QUORUM
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Vote commitments stored in MerkleTree (global for simplicity)
-export ledger voteCommitments: MerkleTree<10, Bytes<32>>;
+// Vote commitments stored in HistoricMerkleTree (maintains history for path lookups after rehash)
+// Using HistoricMerkleTree like eligibleVoters for proper path resolution
+export ledger voteCommitments: HistoricMerkleTree<10, Bytes<32>>;
 
 // Nullifier sets to prevent double-commit and double-reveal
 export ledger commitNullifiers: Set<Bytes<32>>;
@@ -168,7 +171,7 @@ circuit derive_reveal_nullifier(sk: Bytes<32>, proposalId: Field): Bytes<32> {
   return persistentCommit<NullifierPreimage>(preimage, sk);
 }
 
-// Derive vote commitment INSIDE circuit using persistentCommit
+// Derive vote commitment - used by impure circuit
 circuit derive_vote_commitment(sk: Bytes<32>, ballot: Uint<8>, proposalId: Field): Bytes<32> {
   const preimage = CommitmentPreimage {
     ballot: ballot,
@@ -178,17 +181,28 @@ circuit derive_vote_commitment(sk: Bytes<32>, ballot: Uint<8>, proposalId: Field
   return persistentCommit<CommitmentPreimage>(preimage, sk);
 }
 
+// Pure version for client-side commitment computation (takes round as parameter)
+export pure circuit compute_vote_commitment(sk: Bytes<32>, ballot: Uint<8>, proposalId: Field, currentRound: Uint<64>): Bytes<32> {
+  const preimage = CommitmentPreimage {
+    ballot: ballot,
+    proposalId: proposalId,
+    round: currentRound
+  };
+  return persistentCommit<CommitmentPreimage>(preimage, sk);
+}
+
 // Verify voter is in the eligible voters MerkleTree
 circuit verify_voter_eligibility(sk: Bytes<32>): [] {
   const voterPubKey = derive_voter_pubkey(sk);
-  const authPath = get_voter_auth_path(voterPubKey);
+  const path = get_voter_auth_path(voterPubKey);
   
   // Verify the voter's public key is in the eligible voters tree
-  const computedRoot = merkleTreePathRoot<10, Bytes<32>>(authPath);
+  // Using Maybe pattern like micro-dao reference
   assert(
-    eligibleVoters.checkRoot(disclose(computedRoot)) &&
-    voterPubKey == authPath.leaf,
-    "Voter not authorized"
+    disclose(path.is_some) &&
+    eligibleVoters.checkRoot(disclose(merkleTreePathRoot<10, Bytes<32>>(path.value))) &&
+    voterPubKey == path.value.leaf,
+    "Voter not authorized - need to register first!"
   );
 }
 
@@ -293,21 +307,34 @@ export circuit create_proposal(
 }
 
 // Commit phase: Authorized voter commits their vote
-export circuit vote_commit(proposalId: Field): [] {
+// Takes ballot as parameter (like micro-dao) instead of witness
+export circuit vote_commit(proposalId: Field, ballot: Uint<8>): [] {
   const pid = disclose(proposalId);
+  const ballotVal = disclose(ballot);
   
   // Verify we're in commit phase
-  assert(proposalState.lookup(pid) == ProposalState.commit, "Not in commit phase");
+  const currentState = proposalState.lookup(pid);
+  assert(currentState == ProposalState.commit, "Not in commit phase");
   
   // Verify commit deadline hasn't passed
-  assert(currentBlockHeight.lookup(0 as Field) <= commitDeadline.lookup(pid), "Commit phase ended");
+  const currentHeight = currentBlockHeight.lookup(0 as Field);
+  const deadline = commitDeadline.lookup(pid);
+  assert(currentHeight <= deadline, "Commit phase ended");
   
-  // Get private inputs from witnesses
+  // Get secret key from witness
   const sk = get_secret_key();
-  const ballot = get_vote_choice();
   
   // VERIFY VOTER IS AUTHORIZED (MerkleTree membership proof)
-  verify_voter_eligibility(sk);
+  const voterPubKey = derive_voter_pubkey(sk);
+  const path = get_voter_auth_path(voterPubKey);
+  
+  // Check path exists, leaf matches, and root matches (combined like micro-dao)
+  assert(
+    disclose(path.is_some) &&
+    eligibleVoters.checkRoot(disclose(merkleTreePathRoot<10, Bytes<32>>(path.value))) &&
+    voterPubKey == path.value.leaf,
+    "Voter not authorized"
+  );
   
   // Derive nullifier INSIDE circuit (cryptographically enforced)
   const commitNullifier = derive_commit_nullifier(sk, proposalId);
@@ -347,10 +374,12 @@ export circuit vote_reveal(proposalId: Field): [] {
   const commitment = derive_vote_commitment(sk, ballot, proposalId);
   
   // Get MerkleTree path and verify commitment exists
-  const path = get_commitment_path(proposalId, commitment);
+  // Using Maybe pattern like micro-dao reference
+  const path = get_commitment_path(commitment);
   assert(
-    voteCommitments.checkRoot(disclose(merkleTreePathRoot<10, Bytes<32>>(path))) &&
-    commitment == path.leaf,
+    disclose(path.is_some) &&
+    voteCommitments.checkRoot(disclose(merkleTreePathRoot<10, Bytes<32>>(path.value))) &&
+    commitment == path.value.leaf,
     "Commitment not found in tree"
   );
   

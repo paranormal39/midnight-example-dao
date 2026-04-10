@@ -31,6 +31,7 @@ interface SerializedProposal {
   policyDescription: string;
   contractAddress: string;
   proposalId?: string;
+  adminSecret?: string;
 }
 
 const serializeProposal = (p: ProposalMetadata): SerializedProposal => ({

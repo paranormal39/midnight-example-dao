@@ -22,11 +22,16 @@ export enum VoteChoice {
   APPEAL = 2,
 }
 
-// MerkleTree path structure (depth 10)
+// MerkleTree path structure - uses the native runtime format expected by the contract
+// The contract expects: MerkleTreePath<leaf: Bytes<32>, path: Vector<10, MerkleTreePathEntry<sibling: MerkleTreeDigest<field: Field>, goes_left: Boolean>>>
+export type MerkleTreePathEntry = {
+  sibling: { field: bigint };
+  goes_left: boolean; // true = left, false = right
+};
+
 export type MerkleTreePath = {
   leaf: Uint8Array;
-  siblings: Uint8Array[];
-  indices: boolean[];
+  path: MerkleTreePathEntry[];
 };
 
 // Private state for DAO voting with commit/reveal pattern
@@ -50,19 +55,24 @@ export type DaoPrivateState = {
   readonly voterAuthPath: MerkleTreePath | null;
 };
 
+// Maybe type for optional values (matches Compact's Maybe<T>)
+export type Maybe<T> = {
+  is_some: boolean;
+  value: T;
+};
+
 // Witness function type definitions matching the contract
 export type DaoWitnesses = {
   get_secret_key: (context: WitnessContext<DaoPrivateState>) => [DaoPrivateState, Uint8Array];
   get_vote_choice: (context: WitnessContext<DaoPrivateState>) => [DaoPrivateState, bigint];
   get_commitment_path: (
     context: WitnessContext<DaoPrivateState>,
-    proposalId: bigint,
     commitment: Uint8Array
-  ) => [DaoPrivateState, MerkleTreePath];
+  ) => [DaoPrivateState, Maybe<MerkleTreePath>];
   get_voter_auth_path: (
     context: WitnessContext<DaoPrivateState>,
     voterPubKey: Uint8Array
-  ) => [DaoPrivateState, MerkleTreePath];
+  ) => [DaoPrivateState, Maybe<MerkleTreePath>];
 };
 
 // Witness implementations
@@ -77,33 +87,63 @@ export const daoWitnesses: DaoWitnesses = {
     return [privateState, BigInt(privateState.voteChoice)];
   },
 
-  // Returns the MerkleTree path for a commitment
+  // Returns the MerkleTree path for a commitment (Maybe type)
   get_commitment_path: (
     { privateState },
-    _proposalId: bigint,
     commitment: Uint8Array
-  ): [DaoPrivateState, MerkleTreePath] => {
+  ): [DaoPrivateState, Maybe<MerkleTreePath>] => {
     const commitmentHex = Buffer.from(commitment).toString('hex');
     const path = privateState.commitmentPaths.get(commitmentHex);
     
-    if (!path) {
-      throw new Error(`No MerkleTree path found for commitment ${commitmentHex}`);
+    console.log('[WITNESS] get_commitment_path called');
+    console.log('[WITNESS] commitment:', commitmentHex.slice(0, 32) + '...');
+    console.log('[WITNESS] has stored path:', !!path);
+    if (path) {
+      console.log('[WITNESS] path depth:', path.path.length);
+      console.log('[WITNESS] path leaf:', Buffer.from(path.leaf).toString('hex').slice(0, 32) + '...');
     }
     
-    return [privateState, path];
+    if (!path) {
+      // Return none with dummy path structure (10 entries for depth 10)
+      const dummyPath = createDummyPath();
+      return [privateState, { is_some: false, value: dummyPath }];
+    }
+    
+    return [privateState, { is_some: true, value: path }];
   },
 
-  // Returns the MerkleTree path for voter authorization
+  // Returns the MerkleTree path for voter authorization (Maybe type)
   get_voter_auth_path: (
     { privateState },
-    _voterPubKey: Uint8Array
-  ): [DaoPrivateState, MerkleTreePath] => {
-    if (!privateState.voterAuthPath) {
-      throw new Error('Voter authorization path not set - voter may not be registered');
+    voterPubKey: Uint8Array
+  ): [DaoPrivateState, Maybe<MerkleTreePath>] => {
+    console.log('[WITNESS] get_voter_auth_path called');
+    console.log('[WITNESS] voterPubKey from circuit:', Buffer.from(voterPubKey).toString('hex').slice(0, 32) + '...');
+    console.log('[WITNESS] has stored path:', !!privateState.voterAuthPath);
+    if (privateState.voterAuthPath) {
+      console.log('[WITNESS] stored path leaf:', Buffer.from(privateState.voterAuthPath.leaf).toString('hex').slice(0, 32) + '...');
+      // Check if they match
+      const pubKeyHex = Buffer.from(voterPubKey).toString('hex');
+      const leafHex = Buffer.from(privateState.voterAuthPath.leaf).toString('hex');
+      console.log('[WITNESS] pubKey matches leaf:', pubKeyHex === leafHex);
     }
-    return [privateState, privateState.voterAuthPath];
+    if (!privateState.voterAuthPath) {
+      // Return none with dummy path structure (10 entries for depth 10)
+      const dummyPath = createDummyPath();
+      return [privateState, { is_some: false, value: dummyPath }];
+    }
+    return [privateState, { is_some: true, value: privateState.voterAuthPath }];
   },
 };
+
+// Helper to create a dummy path structure with correct depth
+function createDummyPath(): MerkleTreePath {
+  const path = [];
+  for (let i = 0; i < 10; i++) {
+    path.push({ sibling: { field: 0n }, goes_left: false });
+  }
+  return { leaf: new Uint8Array(32), path };
+}
 
 // Helper function to create initial private state
 export function createDaoPrivateState(secretKey: Uint8Array, voterPubKey?: Uint8Array): DaoPrivateState {

@@ -1,13 +1,15 @@
 # Midnight DAO Voting Contract - Core Concepts & Architecture
 
+> **Version:** Compact Toolchain 0.5.1 | Runtime 0.15.0
+
 ## Table of Contents
 
 1. [Introduction](#introduction)
 2. [What is Midnight?](#what-is-midnight)
 3. [Zero-Knowledge Proofs Explained](#zero-knowledge-proofs-explained)
 4. [The Compact Language](#the-compact-language)
-5. [DAO Contract Deep Dive](#dao-contract-deep-dive)
-6. [How Voting Privacy Works](#how-voting-privacy-works)
+5. [Privacy Mechanisms In-Depth](#privacy-mechanisms-in-depth)
+6. [Smart Contract Breakdown](#smart-contract-breakdown)
 7. [Project Architecture](#project-architecture)
 8. [Data Flow](#data-flow)
 9. [Running the Project](#running-the-project)
@@ -17,11 +19,12 @@
 
 ## Introduction
 
-This document explains the core concepts behind the Midnight DAO Voting Contract. It covers:
+This document provides an **in-depth technical reference** for the Midnight DAO Voting Contract. It covers:
 
-- **Why** the contract works (zero-knowledge cryptography)
-- **How** the contract works (Compact language mechanics)
-- **What** each component does (project structure)
+- **Privacy mechanisms**: Nullifiers, MerkleTree proofs, commit/reveal schemes
+- **ZK cryptography**: How zero-knowledge proofs protect voter privacy
+- **Smart contract architecture**: Complete breakdown of `dao.compact`
+- **Implementation details**: Witnesses, circuits, and ledger state
 
 By the end, you'll understand how to build privacy-preserving applications on Midnight.
 
@@ -233,168 +236,261 @@ const publicValue = disclose(myValue);  // Everyone sees this
 
 ---
 
-## DAO Contract Deep Dive
+---
 
-### The Contract Code
+## Privacy Mechanisms In-Depth
+
+This DAO implements **full privacy** using four key cryptographic mechanisms:
+
+### 1. Nullifiers (Double-Vote Prevention)
+
+**What they are:** Deterministic, unique identifiers derived from a voter's secret key.
+
+**How they work:**
+```compact
+// Derive commit nullifier INSIDE circuit using persistentCommit
+circuit derive_commit_nullifier(sk: Bytes<32>, proposalId: Field): Bytes<32> {
+  const preimage = NullifierPreimage {
+    proposalId: proposalId,
+    round: round.read(),
+    domainSep: pad(8, "dao:cn")  // Domain separator for commit nullifier
+  };
+  return persistentCommit<NullifierPreimage>(preimage, sk);
+}
+```
+
+**Why this matters:**
+- Same voter + same proposal = same nullifier (deterministic)
+- Nullifier is stored on-chain to prevent reuse
+- **Cannot be reversed** to reveal voter identity
+- Uses `persistentCommit` which is cryptographically binding
+
+**Two types of nullifiers:**
+| Nullifier | Domain | Purpose |
+|-----------|--------|----------|
+| `commitNullifier` | `dao:cn` | Prevents double-commit in commit phase |
+| `revealNullifier` | `dao:rn` | Prevents double-reveal in reveal phase |
+
+### 2. MerkleTree Proofs (Voter Authorization & Commitment Verification)
+
+**What they are:** Cryptographic proofs that a value exists in a set without revealing the entire set.
+
+**Two MerkleTrees in this contract:**
+
+| Tree | Type | Purpose |
+|------|------|----------|
+| `eligibleVoters` | `HistoricMerkleTree<10, Bytes<32>>` | Stores authorized voter public keys |
+| `voteCommitments` | `HistoricMerkleTree<10, Bytes<32>>` | Stores vote commitments |
+
+**How voter authorization works:**
+```compact
+// Get the voter's public key from their secret
+const voterPubKey = derive_voter_pubkey(sk);
+
+// Get MerkleTree path from witness (off-chain)
+const path = get_voter_auth_path(voterPubKey);
+
+// Verify membership in the tree
+assert(
+  disclose(path.is_some) &&
+  eligibleVoters.checkRoot(disclose(merkleTreePathRoot<10, Bytes<32>>(path.value))) &&
+  voterPubKey == path.value.leaf,
+  "Voter not authorized"
+);
+```
+
+**Why `HistoricMerkleTree`:**
+- Regular `MerkleTree` invalidates paths after rehashing
+- `HistoricMerkleTree` maintains history across rehashes
+- Critical for reveal phase where commitment paths must remain valid
+
+### 3. Commit/Reveal Scheme (Vote Privacy)
+
+**The two-phase voting process:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    COMMIT PHASE                              │
+├─────────────────────────────────────────────────────────────┤
+│  1. Voter has secret key (sk) and chooses ballot (YES/NO)   │
+│                                                              │
+│  2. Derive commitment INSIDE circuit:                        │
+│     commitment = persistentCommit(ballot + proposalId + round, sk) │
+│                                                              │
+│  3. Store commitment in MerkleTree (public, hides vote)     │
+│                                                              │
+│  4. Store commit nullifier (prevents double-commit)         │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    REVEAL PHASE                              │
+├─────────────────────────────────────────────────────────────┤
+│  1. Voter provides same sk and ballot to circuit            │
+│                                                              │
+│  2. Circuit recomputes commitment (must match stored)       │
+│                                                              │
+│  3. Verify commitment exists in MerkleTree                  │
+│                                                              │
+│  4. INCREMENT TALLY INSIDE CIRCUIT (cryptographically       │
+│     enforced - cannot be manipulated)                       │
+│                                                              │
+│  5. Store reveal nullifier (prevents double-reveal)         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 4. Circuit-Enforced Tallying
+
+**Why this is critical:** The vote tally is incremented **inside the ZK circuit**, not by external code.
 
 ```compact
-pragma language_version >= 0.20;
-
-import CompactStandardLibrary;
-
-// ═══════════════════════════════════════════════════════════
-// WITNESSES - Private data providers (off-chain)
-// ═══════════════════════════════════════════════════════════
-
-// Get the voter's secret key (used to derive nullifier)
-witness get_voter_secret(): Bytes<32>;
-
-// Get the voter's vote choice (0=YES, 1=NO, 2=APPEAL) - kept private
-witness get_vote_choice(): Field;
-
-// ═══════════════════════════════════════════════════════════
-// LEDGER STATE (Public, On-Chain)
-// ═══════════════════════════════════════════════════════════
-
-// How many proposals exist
-export ledger proposalCount: Counter;
-
-// Proposal metadata hashes: proposalId → SHA-256(metadata JSON)
-export ledger proposalMeta: Map<Field, Bytes<32>>;
-
-// Proposal status: 0 = active, 1 = closed
-export ledger proposalStatus: Map<Field, Field>;
-
-// Vote commitments - hides individual votes
-export ledger voteCommitments: Map<Field, Set<Bytes<32>>>;
-
-// Nullifiers - prevents double voting
-export ledger voteNullifiers: Map<Field, Set<Bytes<32>>>;
-
-// Vote tallies (hidden until poll closes)
-export ledger votesYes: Map<Field, Field>;
-export ledger votesNo: Map<Field, Field>;
-export ledger votesAppeal: Map<Field, Field>;
-
-// Encrypted votes for later tallying
-export ledger encryptedVotes: Map<Field, Set<Bytes<64>>>;
-
-// ═══════════════════════════════════════════════════════════
-// CIRCUITS (ZK Programs)
-// ═══════════════════════════════════════════════════════════
-
-// Create a new proposal
-export circuit create_proposal(proposalId: Field, metaHash: Bytes<32>): [] {
-  const pid = disclose(proposalId);
-  const hash = disclose(metaHash);
-  proposalCount.increment(1);
-  proposalMeta.insert(pid, hash);
-  proposalStatus.insert(pid, 0 as Field);  // active
-  votesYes.insert(pid, 0 as Field);
-  votesNo.insert(pid, 0 as Field);
-  votesAppeal.insert(pid, 0 as Field);
+// INCREMENT PER-PROPOSAL TALLY INSIDE CIRCUIT
+const ballotVal = disclose(ballot);
+if (ballotVal == 1) {
+  const currentYes = proposalVotesYes.lookup(pid);
+  proposalVotesYes.insert(pid, (currentYes + 1) as Uint<32>);
+} else if (ballotVal == 0) {
+  const currentNo = proposalVotesNo.lookup(pid);
+  proposalVotesNo.insert(pid, (currentNo + 1) as Uint<32>);
+} else {
+  const currentAppeal = proposalVotesAppeal.lookup(pid);
+  proposalVotesAppeal.insert(pid, (currentAppeal + 1) as Uint<32>);
 }
+```
 
-// Cast a private vote
-export circuit cast_vote(
+**Security guarantee:** The ZK proof mathematically proves the tally was incremented correctly. No one can:
+- Add fake votes
+- Modify existing votes
+- Skip the increment
+
+---
+
+## Smart Contract Breakdown
+
+Complete breakdown of `contract/src/dao.compact`:
+
+### State Machine
+
+```compact
+enum ProposalState { setup, commit, reveal, final }
+```
+
+| State | Description | Allowed Actions |
+|-------|-------------|------------------|
+| `setup` | Initial state | Create proposal |
+| `commit` | Voting open | Commit votes (hidden) |
+| `reveal` | Reveal period | Reveal votes (tally incremented) |
+| `final` | Voting closed | View results |
+
+### Witnesses (Private Data Providers)
+
+```compact
+// Voter's 32-byte secret key (never leaves client)
+witness get_secret_key(): Bytes<32>;
+
+// Vote choice: 0=NO, 1=YES, 2=APPEAL
+witness get_vote_choice(): Uint<8>;
+
+// MerkleTree path for commitment verification
+witness get_commitment_path(cm: Bytes<32>): Maybe<MerkleTreePath<10, Bytes<32>>>;
+
+// MerkleTree path for voter authorization
+witness get_voter_auth_path(voterPubKey: Bytes<32>): Maybe<MerkleTreePath<10, Bytes<32>>>;
+```
+
+### Ledger State (On-Chain, Public)
+
+```compact
+// Global state
+export ledger round: Counter;                    // Replay protection
+export ledger proposalCount: Counter;            // Total proposals
+export ledger currentBlockHeight: Map<Field, Uint<64>>;  // Time oracle
+
+// Admin (2-of-3 multi-sig)
+export ledger adminPubKeys: Map<Field, Bytes<32>>;  // 3 admin public keys
+export ledger adminNonce: Counter;                   // Replay protection
+export ledger daoInitialized: Map<Field, Boolean>;   // Init flag
+
+// Voter authorization
+export ledger eligibleVoters: HistoricMerkleTree<10, Bytes<32>>;  // Authorized voters
+
+// Per-proposal state
+export ledger proposalMeta: Map<Field, Bytes<32>>;      // Metadata hash
+export ledger proposalState: Map<Field, ProposalState>; // State machine
+export ledger commitDeadline: Map<Field, Uint<64>>;     // Block height deadline
+export ledger revealDeadline: Map<Field, Uint<64>>;     // Block height deadline
+
+// Vote storage
+export ledger voteCommitments: HistoricMerkleTree<10, Bytes<32>>;  // Commitments
+export ledger commitNullifiers: Set<Bytes<32>>;   // Prevent double-commit
+export ledger revealNullifiers: Set<Bytes<32>>;   // Prevent double-reveal
+
+// Tallies (incremented inside circuit)
+export ledger proposalVotesYes: Map<Field, Uint<32>>;
+export ledger proposalVotesNo: Map<Field, Uint<32>>;
+export ledger proposalVotesAppeal: Map<Field, Uint<32>>;
+export ledger proposalTotalVotes: Map<Field, Uint<32>>;
+export ledger proposalQuorumReached: Map<Field, Boolean>;
+```
+
+### Key Circuits
+
+#### `initialize_dao` - One-time setup
+```compact
+export circuit initialize_dao(admin0, admin1, admin2: Bytes<32>): []
+```
+Sets up 3 admin public keys. Can only be called once.
+
+#### `add_eligible_voter` - Register voter
+```compact
+export circuit add_eligible_voter(voterPubKey: Bytes<32>, adminSecret: Bytes<32>): []
+```
+Adds voter to MerkleTree. Requires admin secret for authorization.
+
+#### `create_proposal` - Start a vote
+```compact
+export circuit create_proposal(
   proposalId: Field,
-  voteCommitment: Bytes<32>,
-  nullifier: Bytes<32>,
-  encryptedVote: Bytes<64>
-): [] {
-  const pid = disclose(proposalId);
-  const commitment = disclose(voteCommitment);
-  const nullHash = disclose(nullifier);
-  const encVote = disclose(encryptedVote);
-  
-  // Get private inputs from witnesses
-  const voterSecret = get_voter_secret();
-  const voteChoice = get_vote_choice();
-  
-  // Verify nullifier matches voter secret (ZK proof)
-  const expectedNullifier = persistent_hash(pad32(voterSecret, pid));
-  assert(expectedNullifier == nullHash, "Invalid nullifier");
-  
-  // Verify vote is valid (0, 1, or 2)
-  assert(voteChoice >= 0 as Field, "Invalid vote");
-  assert(voteChoice <= 2 as Field, "Invalid vote");
-  
-  // Verify commitment matches vote
-  const expectedCommitment = persistent_hash(pad32_field(voteChoice, voterSecret));
-  assert(expectedCommitment == commitment, "Invalid commitment");
-  
-  // Store nullifier (prevents double voting)
-  voteNullifiers.lookup(pid).insert(nullHash);
-  
-  // Store commitment and encrypted vote
-  voteCommitments.lookup(pid).insert(commitment);
-  encryptedVotes.lookup(pid).insert(encVote);
-}
+  metaHash: Bytes<32>,
+  commitDuration: Uint<64>,
+  revealDuration: Uint<64>
+): []
+```
+Creates proposal with time-locked phases based on block height.
 
-// Close proposal and reveal tallies
-export circuit close_proposal(
+#### `vote_commit` - Cast hidden vote
+```compact
+export circuit vote_commit(proposalId: Field, ballot: Uint<8>): []
+```
+1. Verifies voter is in `eligibleVoters` MerkleTree
+2. Derives commitment from (ballot, proposalId, round, secretKey)
+3. Stores commitment in `voteCommitments` MerkleTree
+4. Stores nullifier to prevent double-commit
+
+#### `vote_reveal` - Reveal and count vote
+```compact
+export circuit vote_reveal(proposalId: Field): []
+```
+1. Recomputes commitment from same inputs
+2. Verifies commitment exists in MerkleTree
+3. **Increments tally inside circuit**
+4. Stores reveal nullifier to prevent double-reveal
+
+#### `advance_proposal_by_time` - Phase transition
+```compact
+export circuit advance_proposal_by_time(proposalId: Field): []
+```
+Advances state machine after deadline passes.
+
+#### `advance_proposal_multisig` - Early transition
+```compact
+export circuit advance_proposal_multisig(
   proposalId: Field,
-  finalYes: Field,
-  finalNo: Field,
-  finalAppeal: Field
-): [] {
-  const pid = disclose(proposalId);
-  proposalStatus.insert(pid, 1 as Field);  // closed
-  votesYes.insert(pid, disclose(finalYes));
-  votesNo.insert(pid, disclose(finalNo));
-  votesAppeal.insert(pid, disclose(finalAppeal));
-}
+  adminSecret0: Bytes<32>,
+  adminSecret1: Bytes<32>
+): []
 ```
-
-### Key Privacy Mechanisms
-
-#### 1. Witnesses (Private Inputs)
-
-Witnesses provide private data to circuits without revealing it on-chain:
-
-```compact
-witness get_voter_secret(): Bytes<32>;
-witness get_vote_choice(): Field;
-```
-
-The voter's secret and vote choice are **never disclosed** - they stay private.
-
-#### 2. Nullifiers (Double-Vote Prevention)
-
-```compact
-const expectedNullifier = persistent_hash(pad32(voterSecret, pid));
-assert(expectedNullifier == nullHash, "Invalid nullifier");
-voteNullifiers.lookup(pid).insert(nullHash);
-```
-
-- The ZK proof verifies the nullifier is correctly derived
-- The nullifier is stored on-chain to prevent reuse
-- Cannot be reversed to reveal voter identity
-
-#### 3. Vote Commitments (Hidden Votes)
-
-```compact
-const expectedCommitment = persistent_hash(pad32_field(voteChoice, voterSecret));
-assert(expectedCommitment == commitment, "Invalid commitment");
-voteCommitments.lookup(pid).insert(commitment);
-```
-
-- The commitment hides the actual vote
-- ZK proof verifies the commitment is valid
-- Vote remains hidden until reveal phase
-
-#### 4. Hidden Tallies
-
-Vote tallies (`votesYes`, `votesNo`, `votesAppeal`) remain at **zero** during voting. They are only updated when `close_proposal` is called, revealing the final results.
-
-### Data Types Explained
-
-| Type | Description | Example |
-|------|-------------|---------|
-| `Field` | A large integer (prime field element) | Proposal IDs, vote counts |
-| `Bytes<N>` | Fixed-size byte array | `Bytes<32>` for SHA-256 hashes |
-| `Counter` | Auto-incrementing integer | Proposal count |
-| `Map<K, V>` | Key-value storage | Vote tallies per proposal |
+Allows 2-of-3 admins to advance phase before deadline.
 
 ---
 

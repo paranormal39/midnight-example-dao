@@ -34,6 +34,7 @@ export interface ProposalMetadata {
   policyDescription: string;
   contractAddress: string;
   proposalId?: bigint;
+  adminSecret?: string; // Hex-encoded admin secret for phase advancement
 }
 
 // Re-export VoteChoice for convenience

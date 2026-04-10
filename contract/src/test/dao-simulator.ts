@@ -273,12 +273,8 @@ export class DaoSimulator {
     const ledgerState = this.getLedger();
     const runtimePath = ledgerState.eligibleVoters.findPathForLeaf(voterPubKey) as any;
     if (!runtimePath) return undefined;
-    // Convert runtime path format to our witness format
-    return {
-      leaf: runtimePath.leaf,
-      siblings: runtimePath.path.map((entry: any) => entry.sibling),
-      indices: runtimePath.path.map((entry: any) => entry.dir === 1),
-    };
+    // Return the native runtime path format directly
+    return runtimePath;
   }
 
   // Get commitment path from vote commitments tree
@@ -286,11 +282,7 @@ export class DaoSimulator {
     const ledgerState = this.getLedger();
     const runtimePath = ledgerState.voteCommitments.findPathForLeaf(commitment) as any;
     if (!runtimePath) return undefined;
-    // Convert runtime path format to our witness format
-    return {
-      leaf: runtimePath.leaf,
-      siblings: runtimePath.path.map((entry: any) => entry.sibling),
-      indices: runtimePath.path.map((entry: any) => entry.dir === 1),
-    };
+    // Return the native runtime path format directly
+    return runtimePath;
   }
 }

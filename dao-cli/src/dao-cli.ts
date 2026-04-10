@@ -228,6 +228,38 @@ const deployOrJoin = async (
           const contractAddress = contract.deployTxData.public.contractAddress;
           console.log(`  Contract deployed at: ${contractAddress}\n`);
           
+          // Initialize the DAO with admin keys (required before creating proposals)
+          // For demo purposes, we generate random admin secrets and derive public keys
+          const adminSecret0 = randomBytes(32);
+          const adminSecret1 = randomBytes(32);
+          const adminSecret2 = randomBytes(32);
+          // The contract stores derived public keys, so we pass the derived keys to initialize
+          const adminPubKey0 = daoApi.deriveVoterPubKey(adminSecret0);
+          const adminPubKey1 = daoApi.deriveVoterPubKey(adminSecret1);
+          const adminPubKey2 = daoApi.deriveVoterPubKey(adminSecret2);
+          await api.withStatus('Initializing DAO', () =>
+            daoApi.initializeDao(contract, adminPubKey0, adminPubKey1, adminPubKey2),
+          );
+          
+          // Add the current user as an eligible voter
+          // Derive voter public key from the session's voter secret
+          const voterPubKey = daoApi.deriveVoterPubKey(voterSecret);
+          await api.withStatus('Registering as eligible voter', () =>
+            daoApi.addEligibleVoter(contract, voterPubKey, adminSecret0),
+          );
+          
+          // Wait for indexer to process the voter registration transaction
+          // This ensures the Merkle tree state is properly finalized
+          await api.withStatus('Waiting for indexer sync', async () => {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+          });
+          
+          // Fetch the voter's Merkle tree authorization path and store in private state
+          // This is required for ZK proofs to verify voter eligibility without revealing identity
+          await api.withStatus('Fetching voter authorization proof', () =>
+            daoApi.updatePrivateStateWithVoterAuth(contract, providers, voterPubKey),
+          );
+          
           // Get current proposal count to determine next proposalId
           const state = await daoApi.getDaoLedgerState(providers, contractAddress);
           const proposalId = state?.proposalCount ?? 0n;
@@ -236,6 +268,7 @@ const deployOrJoin = async (
           const metadata = await createProposalMetadata(rli);
           metadata.contractAddress = contractAddress;
           metadata.proposalId = proposalId;
+          metadata.adminSecret = Buffer.from(adminSecret0).toString('hex');
           
           // Create the proposal on-chain
           const metaHash = computeMetaHash(metadata);
@@ -347,7 +380,7 @@ const votingLoop = async (
     switch (choice.trim()) {
       case '1': // Commit YES vote
         try {
-          await api.withStatus('Committing YES vote', () => daoApi.voteYes(contract, proposalId));
+          await api.withStatus('Committing YES vote (generating ZK proof)', () => daoApi.voteYes(contract, providers, proposalId));
           console.log('  ✓ Vote committed! Remember to reveal during REVEAL phase.\n');
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -356,7 +389,7 @@ const votingLoop = async (
         break;
       case '2': // Commit NO vote
         try {
-          await api.withStatus('Committing NO vote', () => daoApi.voteNo(contract, proposalId));
+          await api.withStatus('Committing NO vote (generating ZK proof)', () => daoApi.voteNo(contract, providers, proposalId));
           console.log('  ✓ Vote committed! Remember to reveal during REVEAL phase.\n');
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -365,7 +398,7 @@ const votingLoop = async (
         break;
       case '3': // Commit APPEAL vote
         try {
-          await api.withStatus('Committing APPEAL vote', () => daoApi.voteAppeal(contract, proposalId));
+          await api.withStatus('Committing APPEAL vote (generating ZK proof)', () => daoApi.voteAppeal(contract, providers, proposalId));
           console.log('  ✓ Vote committed! Remember to reveal during REVEAL phase.\n');
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -374,7 +407,7 @@ const votingLoop = async (
         break;
       case '4': // Reveal vote
         try {
-          await api.withStatus('Revealing vote', () => daoApi.voteReveal(contract, proposalId));
+          await api.withStatus('Revealing vote (generating ZK proof)', () => daoApi.voteReveal(contract, providers, proposalId));
           console.log('  ✓ Vote revealed and tally updated!\n');
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -383,6 +416,25 @@ const votingLoop = async (
         break;
       case '5': // Advance proposal phase (by time - after deadline)
         try {
+          // Load admin secret from stored metadata
+          if (!metadata.adminSecret) {
+            console.log('  ✗ No admin secret stored for this proposal. Cannot advance phase.\n');
+            break;
+          }
+          const adminSecret = Buffer.from(metadata.adminSecret, 'hex');
+          const contractAddress = contract.deployTxData.public.contractAddress;
+          const deadlines = await daoApi.getProposalDeadlines(providers, contractAddress, proposalId);
+          const currentPhase = await daoApi.getProposalState(providers, contractAddress, proposalId);
+          
+          // Set block height past the appropriate deadline (commit=1, reveal=2)
+          const commitDeadline = deadlines?.commitDeadline ?? 100n;
+          const revealDeadline = deadlines?.revealDeadline ?? 200n;
+          const targetHeight = currentPhase === 1 ? commitDeadline + 1n : revealDeadline + 1n;
+          
+          await api.withStatus('Updating block height to pass deadline', () => 
+            daoApi.updateBlockHeight(contract, targetHeight, adminSecret)
+          );
+          
           await api.withStatus('Advancing proposal phase', () => daoApi.advanceProposalByTime(contract, proposalId));
           console.log('  ✓ Proposal advanced to next phase!\n');
         } catch (e) {

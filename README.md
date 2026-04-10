@@ -1,20 +1,7 @@
-# Midnight Example DApps
+# Midnight DAO Voting DApp
 
-[![Generic badge](https://img.shields.io/badge/Compact%20Toolchain-0.28.0-1abc9c.svg)](https://shields.io/) [![Generic badge](https://img.shields.io/badge/TypeScript-5.8.3-blue.svg)](https://shields.io/)
+[![Generic badge](https://img.shields.io/badge/Compact%20Toolchain-0.5.1-1abc9c.svg)](https://shields.io/) [![Generic badge](https://img.shields.io/badge/Runtime-0.15.0-green.svg)](https://shields.io/) [![Generic badge](https://img.shields.io/badge/TypeScript-5.8.3-blue.svg)](https://shields.io/)
 
-This repository contains two Midnight smart contract examples:
-
-1. **Counter DApp** - A simple on-chain counter demonstrating basic Midnight contract development
-2. **DAO Voting DApp** - A privacy-preserving voting system using zero-knowledge proofs
-
-Both serve as starting points for building Midnight DApps.
-
-## Available DApps
-
-### Counter DApp
-A simple counter that increments an on-chain value. Great for learning the basics of Midnight contract development.
-
-### DAO Voting DApp
 A privacy-preserving DAO voting contract using a **commit/reveal** scheme with cryptographically enforced privacy:
 
 - **Commit/Reveal Voting** - Two-phase voting where votes are hidden during commit phase and revealed later
@@ -30,34 +17,26 @@ For detailed DAO documentation, see:
 
 ## Network Targets
 
-Supports three network targets:
+Supports Preprod testnet (recommended for getting started):
 
 | Network | Description | Command |
 |---------|-------------|---------|
-| **Preprod** | Public testnet (recommended for getting started) | `npm run preprod-ps` |
-| **Preview** | Public preview testnet | `npm run preview-ps` |
-| **Standalone** | Fully local (node + indexer + proof server via Docker) | `npm run standalone` |
+| **Preprod** | Public testnet | `npm run start-ps` |
 
 ## Project Structure
 
 ```
-example-counter/
+example-dao/
 ├── contract/                          # Smart contracts (Compact language)
-│   ├── src/counter.compact            # Counter smart contract
 │   ├── src/dao.compact                # DAO voting smart contract
-│   ├── src/witnesses.ts               # Counter witness functions
 │   ├── src/dao-witnesses.ts           # DAO witness functions
 │   └── src/test/                      # Contract unit tests
-└── counter-cli/                       # Command-line interfaces
-    ├── src/api.ts                     # Counter contract API
-    ├── src/cli.ts                     # Counter CLI interface
+└── dao-cli/                           # Command-line interface
     ├── src/dao-api.ts                 # DAO contract API
     ├── src/dao-cli.ts                 # DAO CLI interface
     ├── src/dao-types.ts               # DAO TypeScript types
     ├── src/dao-storage.ts             # Local proposal storage
-    ├── proof-server.yml               # Proof server Docker config (preprod/preview)
-    ├── standalone.yml                 # Full local stack Docker config
-    └── standalone.env.example         # Default env vars for standalone mode
+    └── proof-server.yml               # Proof server Docker config
 ```
 
 ## Prerequisites
@@ -72,17 +51,14 @@ The Compact devtools manage and invoke the Compact toolchain (compiler, formatte
 Install the devtools and toolchain:
 
 ```bash
-# Install the Compact devtools
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+# Install the Compact devtools (v0.5.1)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh | sh
 
 # Add to PATH
 source $HOME/.local/bin/env
 
-# Install the toolchain version used by this project
-compact update 0.28.0
-
-# Verify
-compact compile --version
+# Verify installation
+compact --version
 ```
 
 > If you already have the devtools installed, run `compact self update` to get the latest version. If you encounter issues, `compact clean` will reset your `.compact` directory.
@@ -95,52 +71,39 @@ compact compile --version
 npm install
 ```
 
-### 2. Build the smart contracts
+### 2. Build the smart contract
 
 ```bash
 cd contract
-npm run compact:all    # Compiles both counter and DAO contracts
+npm run compact    # Compiles the DAO contract
 npm run build
 npm run test
 ```
 
-Expected output from `npm run compact:all`:
+Expected output from `npm run compact`:
 
 ```
-Compiling 1 circuits:
-  circuit "increment" (k=10, rows=29)
-Compiling 4 circuits:
-  circuit "create_proposal" ...
-  circuit "vote_yes" ...
-  circuit "vote_no" ...
-  circuit "vote_appeal" ...
+Compiling 9 circuits:
+  circuit "initialize_dao" (k=10, rows=898)
+  circuit "add_eligible_voter" (k=13, rows=4609)
+  circuit "create_proposal" (k=10, rows=585)
+  circuit "vote_commit" (k=14, rows=15368)
+  circuit "vote_reveal" (k=14, rows=11752)
+  ...
 ```
 
 The first run may download zero-knowledge parameters (~500MB). This is a one-time download.
 
-### 3. Run a DApp
-
-#### Counter DApp
+### 3. Run the DAO CLI
 
 Option A — **auto-start proof server** (recommended):
 
 ```bash
-cd counter-cli
-npm run preprod-ps
+cd dao-cli
+npm run start-ps
 ```
 
-This pulls the proof server Docker image, starts it, and launches the Counter CLI.
-
-#### DAO Voting DApp
-
-```bash
-cd counter-cli
-npm run dao-ps    # Auto-starts proof server
-# or
-npm run dao       # Manual proof server (start separately)
-```
-
-This launches the DAO CLI for creating proposals and voting.
+This pulls the proof server Docker image, starts it, and launches the DAO CLI.
 
 > **Mac ARM (Apple Silicon) users**: If the proof server hangs, enable Docker VMM in Docker Desktop: Settings → General → "Virtual Machine Options" → select **Docker VMM**. Restart Docker after changing.
 
@@ -149,7 +112,7 @@ Option B — **manual proof server** (if you prefer to manage it yourself):
 Start the proof server in a separate terminal:
 
 ```bash
-cd counter-cli
+cd dao-cli
 docker compose -f proof-server.yml up
 ```
 
@@ -162,11 +125,11 @@ INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:6300", w
 Then in another terminal:
 
 ```bash
-cd counter-cli
-npm run preprod
+cd dao-cli
+npm run start
 ```
 
-## Using the Counter DApp
+## Using the DAO Voting DApp
 
 ### Step 1: Create a wallet
 
@@ -207,83 +170,23 @@ The CLI shows progress:
   ✓ Configuring providers
 ```
 
-Once DUST is available, the contract menu appears with your balance:
-
-```
-──────────────────────────────────────────────────────────────
-  Contract Actions                    DUST: 405,083,000,000,000
-──────────────────────────────────────────────────────────────
-  [1] Deploy a new counter contract
-  [2] Join an existing counter contract
-  [3] Monitor DUST balance
-  [4] Exit
-```
-
-### Step 4: Deploy a counter contract
-
-1. Choose option **[1]** to deploy
-2. Wait for proving, balancing, and submission
-3. The contract address is displayed on success:
-
-```
-  ✓ Deploying counter contract
-  Contract deployed at: <contract address>
-```
-
-**Save the contract address** to rejoin the contract in future sessions.
-
-### Step 5: Interact with your contract
-
-After deployment, the counter menu appears:
-
-- **[1] Increment counter** — submits a transaction to increment the on-chain counter
-- **[2] Display current counter value** — queries the blockchain for the current value
-- **[3] Exit**
-
-Each increment creates a real transaction on Midnight Preprod.
-
-### Returning to an existing wallet and contract
-
-Next time you run the DApp:
-
-1. Choose option **[2]** to restore wallet from seed
-2. Enter your saved seed
-3. Wait for sync and DUST generation
-4. Choose option **[2]** to join existing contract
-5. Enter your saved contract address
-
-## Monitoring DUST Balance
-
-The contract menu includes a DUST monitor (option **[3]**) that shows a live-updating display:
-
-```
-  [10:20:03 PM] DUST: 471,219,000,000,000 (1 coins, 0 pending) | NIGHT: 1 UTXOs, 1 registered | ✓ ready to deploy
-```
-
-This is useful for:
-- Checking if you have enough DUST before deploying
-- Monitoring DUST generation after registering NIGHT
-- Diagnosing issues where DUST appears locked (pending coins from failed transactions)
+Once DUST is available, the DAO menu appears with your balance.
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
 | `compact: command not found` | Run `source $HOME/.local/bin/env` to add it to your PATH. |
-| `connect ECONNREFUSED 127.0.0.1:6300` | Start the proof server: `cd counter-cli && docker compose -f proof-server.yml up` |
+| `connect ECONNREFUSED 127.0.0.1:6300` | Start the proof server: `cd dao-cli && docker compose -f proof-server.yml up` |
 | Proof server hangs on Mac ARM (Apple Silicon) | In Docker Desktop: Settings → General → "Virtual Machine Options" → select **Docker VMM**. Restart Docker after changing. |
-| `Failed to clone intent` during deploy | Wallet SDK signing bug — already worked around in this codebase. If you see this, ensure you're running the latest code. See [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) Section 4. |
+| `Failed to clone intent` during deploy | Wallet SDK signing bug — already worked around in this codebase. If you see this, ensure you're running the latest code. |
 | DUST balance drops to 0 after failed deploy | Known wallet SDK issue. Restart the DApp to release locked DUST coins. |
 | Wallet shows 0 balance after faucet | Wait for sync to complete. If still 0, check that you sent to the correct unshielded address. |
 | Could not find a working container runtime strategy | Docker isn't running. Start Docker and try again. |
 | Tests fail with "Cannot find module" | Build the contract first: `cd contract && npm run compact && npm run build` |
 | Node.js warnings about experimental features | Normal — these don't affect functionality. |
 
-## Using the DAO Voting DApp
-
-The DAO CLI provides a privacy-preserving voting interface:
-
-### DAO Menu Options
+## DAO Menu Options
 
 After wallet setup, the DAO menu appears:
 

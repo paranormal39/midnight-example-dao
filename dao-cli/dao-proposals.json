@@ -1,3 +1,163 @@
 {
-  "proposals": []
+  "proposals": [
+    {
+      "policyType": "treasury allocation",
+      "policyTitle": "sell night for dust",
+      "policyDescription": "sell all the night for all the dust",
+      "contractAddress": "83bb10196755d64da8b619f9a30d889c865421d67acaa18c1aefa5ee667397e4",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "Treasury Allocation",
+      "policyTitle": "sell Night for dust",
+      "policyDescription": "sell all the night for all the dust",
+      "contractAddress": "49c88bcd0ae763768fa41e621282f720d00f49420292ddfcb79af0354083d6d5",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "Treasury Allocation",
+      "policyTitle": "Sell Night for Dust",
+      "policyDescription": "Sell all the Night for all the dust",
+      "contractAddress": "b14688d9c58ff662ca28a63fd90bc89c2a2fa4984bb3d2bdba49b9b4d4f745ac",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "Treasruy allocation",
+      "policyTitle": "sell night for dust",
+      "policyDescription": "sell all the night for all the dust",
+      "contractAddress": "9c46a7c4a66f6009a824cb34b2de3861268022d38a0f811951ff33df372950dd",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "Treasury allocation",
+      "policyTitle": "sell night for dust",
+      "policyDescription": "sell night all the dust",
+      "contractAddress": "03d517563c588c44a3561f1e2436b8463b0aaebc25d7658ada8a27c79cc7401d",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "treasruy allocation",
+      "policyTitle": "sell all the night for xrp",
+      "policyDescription": "sell all the dust for xrp",
+      "contractAddress": "8814ff6e5b2badf0ee8cbad6339a5e2bfc37e03004258096c4f69c701f7a56dd",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "islandghost",
+      "policyTitle": "sell island ghost",
+      "policyDescription": "we trap her on a island",
+      "contractAddress": "2c7891e011ac59be2dc1a1bba79280134745503eff392e29fa2440523dec35d2",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "abduction",
+      "policyTitle": "we abudct kids",
+      "policyDescription": "pull up to a school in a icecream van and we just grab em when they get close",
+      "contractAddress": "6ca5986874c1951d56848c60ec90a6839ec30ed9ab4a2e6a003f011f299a8f33",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "sell xrp",
+      "policyTitle": "sell xrp for dust",
+      "policyDescription": "sell all the xrp for all the dust",
+      "contractAddress": "deb27cd7ae7292282add4d283fe45098f7ac483bb5ceead80e72d91b852610c2",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "sell treasury",
+      "policyTitle": "sell xrp for dust",
+      "policyDescription": "sell all the xrp for all the dust",
+      "contractAddress": "ab2c4eba4248feb8e7f2cf156ce99d967979135fa590fc2e8a035e1c10605a6c",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "sell dust",
+      "policyTitle": "sell all the dust",
+      "policyDescription": "sell all the dust for xrppp",
+      "contractAddress": "2ac3af11266fb390a79d11455a00c7eead6e351f1c4c7792ded3934104cb59ae",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "Treasury allocation",
+      "policyTitle": "sell dust",
+      "policyDescription": "sell dust for 589 xrp",
+      "contractAddress": "7324cb7dd2a95cdb156934fe031a84f1bb62a15e5df7f7c73aec1c475859093e",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "Election",
+      "policyTitle": "election for joe",
+      "policyDescription": "should we elect joe for future",
+      "contractAddress": "ebdf11de74b8430bb4db4a2af6a138b26bd13c10cc685d2a81709c0bfc69d882",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "Treasury allocation",
+      "policyTitle": "sell xrp",
+      "policyDescription": "sell xrp for dust",
+      "contractAddress": "44c0a46ad5a5c6d2de10cc2c070c267541ca918c0bb717d8394fdcba0178cb36",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "policy",
+      "policyTitle": "title",
+      "policyDescription": "description v2",
+      "contractAddress": "ddba6bac3474e226a1ce83a881f910512ff9981cabfb244f8d7efed9cfd997b9",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "space",
+      "policyTitle": "go to the moon",
+      "policyDescription": "our token will go to the moon!",
+      "contractAddress": "55eb88ebe8bbabd40fc29cf2c5438d7426db61c5b7bd1c9d71e3f1c73265ae10",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "dao type",
+      "policyTitle": "switch to health",
+      "policyDescription": "we should siwthc to health insurance",
+      "contractAddress": "232c660d5f1a08eaba1616db9214c5c623e028becbfd22ad751a998d3e23ad14",
+      "proposalId": "0"
+    },
+    {
+      "policyType": "puppies",
+      "policyTitle": "new doggy",
+      "policyDescription": "buy a new puppie",
+      "contractAddress": "63037145b34c1858302a69aaf53eb886a8f297799aa7a7d55c50c21fe5b24428",
+      "proposalId": "0",
+      "adminSecret": "1c2ace1aaaa4c488357ee808f327e9122dfc6434edb463d92f516006325b0591"
+    },
+    {
+      "policyType": "money",
+      "policyTitle": "get money",
+      "policyDescription": "get money f bitches",
+      "contractAddress": "3d5505563a6b1e680d9d889ad4c4b4532418e6eff5ca925aab0b9e691b289c34",
+      "proposalId": "0",
+      "adminSecret": "010060ec4d0a88b6c68d97e74bf00bd89e482032ff27787a44d0ea51f7a35c08"
+    },
+    {
+      "policyType": "money",
+      "policyTitle": "get it",
+      "policyDescription": "fuck bitch",
+      "contractAddress": "0dea1222e87965c591c4355d383e0b861ad816ca5da07828f3ead4c95c2909e9",
+      "proposalId": "0",
+      "adminSecret": "335f006846ac0c03b5dfc438981510fbc5a03f5e6f40c5d538d51364dc4cf012"
+    },
+    {
+      "policyType": "art",
+      "policyTitle": "purchase more art",
+      "policyDescription": "puse treasrufy fudns for nft purchases",
+      "contractAddress": "94db6112cb8e5e51610887a1ad6174a0572f7973630714a7e8ab925f575f6717",
+      "proposalId": "0",
+      "adminSecret": "b147decf5a992d19e4af564b1de120c0cc4ed69847c63b15e7ee80484a19c310"
+    },
+    {
+      "policyType": "gaming",
+      "policyTitle": "new torunament",
+      "policyDescription": "should we crete a new cod tournament",
+      "contractAddress": "5ac97070a2a1c4f5bc9d651cad05cbcfd589e9fab04b82351eb0499838c7a08b",
+      "proposalId": "0",
+      "adminSecret": "89c848716ee10abbe59b7cfffc163675197d5f5cf3a03c7f5154c5a58328a8c0"
+    }
+  ]
 }

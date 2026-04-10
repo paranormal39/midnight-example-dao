@@ -14,17 +14,17 @@
 // limitations under the License.
 
 import { type ContractAddress } from '@midnight-ntwrk/compact-runtime';
-import { Dao, type DaoPrivateState, daoWitnesses, VoteChoice, createDaoPrivateState, withVoteChoice, withCommitmentPath, type MerkleTreePath } from '@midnight-ntwrk/dao-contract';
-import { deployContract, findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
+import { Dao, type DaoPrivateState, daoWitnesses, VoteChoice, createDaoPrivateState, withVoteChoice, withCommitment, withCommitmentPath, withVoterAuthPath, type MerkleTreePath } from '@midnight-ntwrk/dao-contract';
+import { deployContract, findDeployedContract } from '@midnight-ntwrk/midnight-js/contracts';
 import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
-import { type FinalizedTxData } from '@midnight-ntwrk/midnight-js-types';
+import { type FinalizedTxData } from '@midnight-ntwrk/midnight-js/types';
 import { type Logger } from 'pino';
 import { type DaoCircuits, type DaoProviders, type DeployedDaoContract, DaoPrivateStateId } from './dao-types.js';
 import { type Config, daoContractConfig } from './config.js';
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
-import { assertIsContractAddress } from '@midnight-ntwrk/midnight-js-utils';
+import { assertIsContractAddress } from '@midnight-ntwrk/midnight-js/utils';
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
 import { type WalletContext, createWalletAndMidnightProvider } from './api.js';
 import { randomBytes } from 'crypto';
@@ -32,6 +32,27 @@ import { randomBytes } from 'crypto';
 type DaoContractType = Dao.Contract<DaoPrivateState>;
 
 let logger: Logger;
+
+// Derive voter public key from secret using the contract's pure circuit
+export const deriveVoterPubKey = (voterSecret: Uint8Array): Uint8Array => {
+  return Dao.pureCircuits.derive_voter_pubkey(voterSecret);
+};
+
+// Compute vote commitment using the contract's pure circuit
+// This is used to store the commitment locally for later reveal
+export const computeVoteCommitment = (
+  voterSecret: Uint8Array,
+  voteChoice: VoteChoice,
+  proposalId: bigint,
+  currentRound: bigint,
+): Uint8Array => {
+  return Dao.pureCircuits.compute_vote_commitment(
+    voterSecret,
+    BigInt(voteChoice),
+    proposalId,
+    currentRound,
+  );
+};
 
 const daoCompiledContract = CompiledContract.make('dao', Dao.Contract).pipe(
   CompiledContract.withWitnesses(daoWitnesses),
@@ -174,6 +195,88 @@ export const getProposalState = async (
   return state.proposalState.get(proposalId) ?? null;
 };
 
+// Construct a Merkle tree path for a leaf at position 0 in a depth-10 tree
+// This is used when we know the voter was just added and is the first/only leaf
+const constructMerklePathForFirstLeaf = (leaf: Uint8Array, depth: number = 10): MerkleTreePath => {
+  // For a leaf at position 0, all siblings are empty (zero field) and all directions are right (goes_left=false)
+  const path = [];
+  for (let i = 0; i < depth; i++) {
+    path.push({
+      sibling: { field: 0n },
+      goes_left: false, // false = goes right (leaf is on left side at position 0)
+    });
+  }
+  return { leaf, path };
+};
+
+// Get voter authorization path from the on-chain eligible voters Merkle tree
+export const getVoterAuthPath = async (
+  providers: DaoProviders,
+  contractAddress: ContractAddress,
+  voterPubKey: Uint8Array,
+): Promise<MerkleTreePath | null> => {
+  assertIsContractAddress(contractAddress);
+  const contractState = await providers.publicDataProvider.queryContractState(contractAddress);
+  if (!contractState) return null;
+  
+  const ledgerState = Dao.ledger(contractState.data);
+  
+  // Try to get the path from the tree
+  try {
+    const runtimePath = ledgerState.eligibleVoters.findPathForLeaf(voterPubKey) as any;
+    if (runtimePath) {
+      logger.info('Got runtime path from findPathForLeaf');
+      // Log the first path entry to see its structure
+      if (runtimePath.path && runtimePath.path.length > 0) {
+        const firstEntry = runtimePath.path[0];
+        logger.info(`First path entry keys: ${Object.keys(firstEntry).join(', ')}`);
+        logger.info(`First path entry: ${JSON.stringify(firstEntry, (k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
+      }
+      // The runtime returns 'dir' but contract expects 'goes_left' - transform if needed
+      if (runtimePath.path && runtimePath.path[0] && 'dir' in runtimePath.path[0]) {
+        logger.info('Transforming path from dir to goes_left format');
+        const transformedPath = {
+          leaf: runtimePath.leaf,
+          path: runtimePath.path.map((entry: any) => ({
+            sibling: entry.sibling,
+            goes_left: entry.dir === 1, // dir=1 means goes_left=true
+          })),
+        };
+        return transformedPath;
+      }
+      return runtimePath;
+    }
+  } catch (e) {
+    // If findPathForLeaf fails (e.g., tree not rehashed), construct path manually
+    logger.info(`findPathForLeaf failed: ${e}`);
+  }
+  
+  // Fallback: construct path for first leaf position
+  logger.info('Using constructed Merkle path for first leaf position');
+  const path = constructMerklePathForFirstLeaf(voterPubKey, 10);
+  logger.info(`Constructed path structure: ${JSON.stringify(path, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2).slice(0, 500)}`);
+  return path;
+};
+
+// Update the contract's private state with the voter auth path
+export const updatePrivateStateWithVoterAuth = async (
+  daoContract: DeployedDaoContract,
+  providers: DaoProviders,
+  voterPubKey: Uint8Array,
+): Promise<void> => {
+  const contractAddress = daoContract.deployTxData.public.contractAddress;
+  const authPath = await getVoterAuthPath(providers, contractAddress, voterPubKey);
+  if (!authPath) {
+    throw new Error('Voter not found in eligible voters tree');
+  }
+  
+  // Update the private state with the voter auth path
+  const currentState = await providers.privateStateProvider.get('daoPrivateState') as DaoPrivateState;
+  const updatedState = withVoterAuthPath(currentState, authPath);
+  await providers.privateStateProvider.set('daoPrivateState', updatedState);
+  logger.info('Updated private state with voter authorization path');
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // CONTRACT DEPLOYMENT AND JOINING
 // ═══════════════════════════════════════════════════════════════════════════
@@ -294,55 +397,183 @@ export const updateBlockHeight = async (
 
 // Commit phase: Submit a vote commitment (vote stays hidden)
 // The nullifier and commitment are derived INSIDE the circuit using persistentCommit
+// ballot: 0=NO, 1=YES, 2=APPEAL (passed as parameter like micro-dao)
 export const voteCommit = async (
   daoContract: DeployedDaoContract,
   proposalId: bigint,
+  ballot: bigint,
 ): Promise<FinalizedTxData> => {
-  logger.info(`Committing vote on proposal ${proposalId}...`);
+  logger.info(`Committing vote on proposal ${proposalId} with ballot ${ballot}...`);
   logger.info(`Vote choice and nullifier are derived inside the ZK circuit`);
   
-  const finalizedTxData = await daoContract.callTx.vote_commit(proposalId);
+  const finalizedTxData = await daoContract.callTx.vote_commit(proposalId, ballot);
   
   logger.info(`Vote committed! Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
+};
+
+// Get commitment path from the on-chain vote commitments Merkle tree
+export const getCommitmentPath = async (
+  providers: DaoProviders,
+  contractAddress: ContractAddress,
+  commitment: Uint8Array,
+): Promise<MerkleTreePath | null> => {
+  assertIsContractAddress(contractAddress);
+  const contractState = await providers.publicDataProvider.queryContractState(contractAddress);
+  if (!contractState) return null;
+  
+  const ledgerState = Dao.ledger(contractState.data);
+  try {
+    const runtimePath = ledgerState.voteCommitments.findPathForLeaf(commitment) as any;
+    if (!runtimePath) return null;
+    
+    // Return the native runtime path format directly - the contract expects this format
+    return runtimePath;
+  } catch (e) {
+    // If findPathForLeaf fails (e.g., tree not rehashed), log and return null
+    logger.info(`findPathForLeaf failed for commitment: ${e}`);
+    return null;
+  }
 };
 
 // Reveal phase: Reveal vote and increment tally
 // The tally is incremented INSIDE the circuit (cryptographically enforced)
 export const voteReveal = async (
   daoContract: DeployedDaoContract,
+  providers: DaoProviders,
   proposalId: bigint,
 ): Promise<FinalizedTxData> => {
   logger.info(`Revealing vote on proposal ${proposalId}...`);
-  logger.info(`Tally will be incremented inside the ZK circuit`);
   
+  // Get the commitment from private state and fetch its Merkle path
+  const currentState = await providers.privateStateProvider.get('daoPrivateState') as DaoPrivateState;
+  const commitment = currentState.commitments.get(proposalId);
+  if (!commitment) {
+    throw new Error('No commitment found for this proposal - did you commit a vote first?');
+  }
+  
+  const contractAddress = daoContract.deployTxData.public.contractAddress;
+  
+  // Retry fetching the commitment path with exponential backoff
+  // The tree may need time to be rehashed after insertions
+  let commitmentPath: MerkleTreePath | null = null;
+  let retries = 0;
+  const maxRetries = 5;
+  
+  while (!commitmentPath && retries < maxRetries) {
+    commitmentPath = await getCommitmentPath(providers, contractAddress, commitment);
+    if (!commitmentPath) {
+      retries++;
+      if (retries < maxRetries) {
+        const waitMs = 1000 * Math.pow(2, retries - 1); // 1s, 2s, 4s, 8s, 16s
+        logger.info(`Commitment path not found, retrying in ${waitMs}ms... (attempt ${retries}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+      }
+    }
+  }
+  
+  if (!commitmentPath) {
+    throw new Error('Commitment not found in on-chain Merkle tree after retries - tree may not be properly indexed');
+  }
+  
+  // Update private state with commitment path for ZK proof (keyed by commitment, not proposalId)
+  const updatedState = withCommitmentPath(currentState, commitment, commitmentPath);
+  await providers.privateStateProvider.set('daoPrivateState', updatedState);
+  
+  logger.info(`Tally will be incremented inside the ZK circuit`);
   const finalizedTxData = await daoContract.callTx.vote_reveal(proposalId);
   
   logger.info(`Vote revealed! Transaction ${finalizedTxData.public.txId} added in block ${finalizedTxData.public.blockHeight}`);
   return finalizedTxData.public;
 };
 
+// Helper to update private state with vote choice before committing
+const updateVoteChoice = async (
+  providers: DaoProviders,
+  choice: VoteChoice,
+): Promise<void> => {
+  const currentState = await providers.privateStateProvider.get('daoPrivateState') as DaoPrivateState;
+  const updatedState = withVoteChoice(currentState, choice);
+  await providers.privateStateProvider.set('daoPrivateState', updatedState);
+};
+
+// Helper to store commitment after successful vote_commit
+const storeCommitmentAfterCommit = async (
+  providers: DaoProviders,
+  contractAddress: ContractAddress,
+  proposalId: bigint,
+  voteChoice: VoteChoice,
+): Promise<void> => {
+  // Get current round from ledger state
+  const state = await getDaoLedgerState(providers, contractAddress);
+  const currentRound = state?.round ?? 0n;
+  
+  // Get voter secret from private state and compute commitment
+  const currentState = await providers.privateStateProvider.get('daoPrivateState') as DaoPrivateState;
+  const commitment = computeVoteCommitment(
+    currentState.secretKey,
+    voteChoice,
+    proposalId,
+    currentRound,
+  );
+  
+  // Store commitment in private state for later reveal
+  const updatedState = withCommitment(currentState, proposalId, commitment);
+  await providers.privateStateProvider.set('daoPrivateState', updatedState);
+  logger.info('Stored vote commitment for reveal phase');
+};
+
+// Helper to refresh voter auth path before voting (ensures we have latest tree state)
+const refreshVoterAuthPath = async (
+  daoContract: DeployedDaoContract,
+  providers: DaoProviders,
+): Promise<void> => {
+  const currentState = await providers.privateStateProvider.get('daoPrivateState') as DaoPrivateState;
+  const voterPubKey = deriveVoterPubKey(currentState.secretKey);
+  await updatePrivateStateWithVoterAuth(daoContract, providers, voterPubKey);
+};
+
 // Convenience functions for commit phase with specific vote choices
 export const voteYes = async (
   daoContract: DeployedDaoContract,
+  providers: DaoProviders,
   proposalId: bigint,
 ): Promise<FinalizedTxData> => {
-  // Vote choice is set in private state before calling
-  return voteCommit(daoContract, proposalId);
+  // Refresh voter auth path to ensure we have latest tree state
+  await refreshVoterAuthPath(daoContract, providers);
+  // Update private state with vote choice before ZK proof generation
+  await updateVoteChoice(providers, VoteChoice.YES);
+  const result = await voteCommit(daoContract, proposalId, BigInt(VoteChoice.YES));
+  // Store commitment for reveal phase
+  const contractAddress = daoContract.deployTxData.public.contractAddress;
+  await storeCommitmentAfterCommit(providers, contractAddress, proposalId, VoteChoice.YES);
+  return result;
 };
 
 export const voteNo = async (
   daoContract: DeployedDaoContract,
+  providers: DaoProviders,
   proposalId: bigint,
 ): Promise<FinalizedTxData> => {
-  return voteCommit(daoContract, proposalId);
+  await refreshVoterAuthPath(daoContract, providers);
+  await updateVoteChoice(providers, VoteChoice.NO);
+  const result = await voteCommit(daoContract, proposalId, BigInt(VoteChoice.NO));
+  const contractAddress = daoContract.deployTxData.public.contractAddress;
+  await storeCommitmentAfterCommit(providers, contractAddress, proposalId, VoteChoice.NO);
+  return result;
 };
 
 export const voteAppeal = async (
   daoContract: DeployedDaoContract,
+  providers: DaoProviders,
   proposalId: bigint,
 ): Promise<FinalizedTxData> => {
-  return voteCommit(daoContract, proposalId);
+  await refreshVoterAuthPath(daoContract, providers);
+  await updateVoteChoice(providers, VoteChoice.APPEAL);
+  const result = await voteCommit(daoContract, proposalId, BigInt(VoteChoice.APPEAL));
+  const contractAddress = daoContract.deployTxData.public.contractAddress;
+  await storeCommitmentAfterCommit(providers, contractAddress, proposalId, VoteChoice.APPEAL);
+  return result;
 };
 
 export const displayVoteResults = async (
@@ -366,10 +597,16 @@ export const displayVoteResults = async (
 export const configureDaoProviders = async (ctx: WalletContext, config: Config) => {
   const walletAndMidnightProvider = await createWalletAndMidnightProvider(ctx);
   const zkConfigProvider = new NodeZkConfigProvider<DaoCircuits>(daoContractConfig.zkConfigPath);
+  // accountId and privateStoragePasswordProvider are required by levelPrivateStateProvider.
+  // The coin public key is encoded as base64 for the password — base64 output covers all
+  // four character classes and avoids repeated-character runs found in raw hex strings.
+  const accountId = walletAndMidnightProvider.getCoinPublicKey();
+  const storagePassword = `${Buffer.from(accountId, 'hex').toString('base64')}!`;
   return {
     privateStateProvider: levelPrivateStateProvider<typeof DaoPrivateStateId>({
       privateStateStoreName: daoContractConfig.privateStateStoreName,
-      walletProvider: walletAndMidnightProvider,
+      accountId,
+      privateStoragePasswordProvider: () => storagePassword,
     }),
     publicDataProvider: indexerPublicDataProvider(config.indexer, config.indexerWS),
     zkConfigProvider,
