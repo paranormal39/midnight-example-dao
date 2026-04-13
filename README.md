@@ -249,6 +249,23 @@ The DAO uses a **two-phase voting scheme** for cryptographic privacy:
 
 For more details, see [DAO-CONCEPTS.md](DAO-CONCEPTS.md).
 
+## Known Good Stack
+
+> **Always verify versions against the [Midnight Compatibility Matrix](https://docs.midnight.network/) before upgrading dependencies.**
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Compact devtools | 0.5.1 | `compact --version` |
+| Compact toolchain | 0.30.0 | Installed via devtools |
+| Compact runtime | 0.15.0 | `@midnight-ntwrk/compact-runtime` |
+| Midnight.js | 4.0.4 | `@midnight-ntwrk/midnight-js` |
+| Ledger | 8.0.3 | `@midnight-ntwrk/ledger-v8` |
+| Proof server | 8.0.3 | Docker image tag |
+| testkit-js | 4.0.4 | For simulator tests |
+| Environment | Preprod | Public testnet |
+
+**Local dev (standalone.yml):** Uses indexer `3.0.0` and node `0.20.0` for local testing. These may differ from preprod versions.
+
 ## Useful Links
 
 - [Preprod Faucet](https://faucet.preprod.midnight.network) — Get preprod tNight tokens
